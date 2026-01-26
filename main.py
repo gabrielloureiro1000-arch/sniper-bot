@@ -34,7 +34,7 @@ def start(message):
             for t in tokens:
                 addr = t.get('address')
                 mcap = t.get('market_cap', 0)
-                if addr not in vistos and 15000 <= mcap <= 600000:
+           if addr not in vistos:
                     symbol = t.get('symbol', '???')
                     msg = (f"💎 **NOVA GEMA DETECTADA**\n\n"
                            f"**Token:** ${symbol}\n"

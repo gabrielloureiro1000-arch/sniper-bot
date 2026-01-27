@@ -16,13 +16,21 @@ PROXY_KEY = "0964b99b46c741438a03ee5d76442a8a"
 bot = telebot.TeleBot(TOKEN)
 
 def buscar_gemas():
+    # Testando conexão direta com timeout curto para não travar
     url_gmgn = "https://gmgn.ai/api/v1/token_trending/sol?period=1h&limit=20"
-    proxy_url = f"https://api.scraperant.com/v2/general?url={url_gmgn}&x-api-key={PROXY_KEY}"
     try:
-        r = requests.get(proxy_url, timeout=30)
-        return r.json().get('data', {}).get('tokens', [])
+        # Tentativa de conexão alternativa
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url_gmgn, headers=headers, timeout=15)
+        if r.status_code == 200:
+            return r.json().get('data', {}).get('tokens', [])
+        else:
+            # Se falhar direto, tenta pelo proxy mas com tratamento de erro
+            proxy_url = f"https://api.scraperant.com/v2/general?url={url_gmgn}&x-api-key={PROXY_KEY}"
+            r = requests.get(proxy_url, timeout=20)
+            return r.json().get('data', {}).get('tokens', [])
     except Exception as e:
-        print(f"Erro na API GMGN: {e}")
+        print(f"Aguardando sinal de rede... ({e})")
         return []
 
 @bot.message_handler(commands=['start'])

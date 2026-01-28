@@ -5,17 +5,16 @@ import os
 from flask import Flask
 from threading import Thread
 
-# 1. Configuração do Servidor Web para a Render
 app = Flask('')
 @app.route('/')
-def home(): return "Sniper Ativo e Operacional"
+def home(): return "Bot Online"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# 2. Configurações do Bot (Token Novo Aplicado)
-TOKEN = "8595782081:AAEZ885Y-CEYV85Qd0WGDW50_qryE4gXyEs"
+# Puxa o token direto da configuração da Render
+TOKEN = os.environ.get('TELEGRAM_TOKEN')
 PROXY_KEY = "0964b99b46c741438a03ee5d76442a8a"
 bot = telebot.TeleBot(TOKEN)
 
@@ -24,33 +23,28 @@ def buscar_gemas():
     proxy_url = f"https://api.scraperant.com/v2/general?url={url_gmgn}&x-api-key={PROXY_KEY}"
     try:
         r = requests.get(proxy_url, timeout=20)
-        if r.status_code == 200:
-            return r.json().get('data', {}).get('tokens', [])
-        return []
-    except Exception as e:
-        print(f"Erro ao buscar dados: {e}")
+        return r.json().get('data', {}).get('tokens', [])
+    except:
         return []
 
-# 3. Comando Start
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "🎯 **SNIPER PROFISSIONAL ATIVADO**\nMonitorando Smart Money (MCap $15k - $600k)...")
+    bot.reply_to(message, "🎯 **SNIPER ATIVADO**")
     vistos = set()
-    print(f"Bot iniciado pelo usuário: {message.chat.id}")
-    
     while True:
         try:
             tokens = buscar_gemas()
             for t in tokens:
                 addr = t.get('address')
                 mcap = t.get('market_cap', 0)
-                
-                # Filtro de Market Cap
                 if addr not in vistos and 15000 <= mcap <= 600000:
                     symbol = t.get('symbol', '???')
-                    name = t.get('name', 'Token')
-                    
-                    msg = (f"💎 **GEMA SMART MONEY DETECTADA**\n\n"
-                           f"**Token:** {name} (${symbol})\n"
-                           f"**Market Cap:** ${mcap:,.0f}\n\n"
-                           f"🔗 [Analisar na GMGN](
+                    msg = f"💎 **GEMA:** ${symbol}\n**MCap:** ${mcap:,.0f}\nhttps://gmgn.ai/sol/token/{addr}"
+                    bot.send_message(message.chat.id, msg)
+                    vistos.add(addr)
+        except: pass
+        time.sleep(60)
+
+if __name__ == "__main__":
+    Thread(target=run_flask).start()
+    bot.infinity_polling()

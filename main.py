@@ -5,17 +5,17 @@ import os
 from flask import Flask
 from threading import Thread
 
-# Configuração essencial para a Render não dar erro de porta
+# 1. Configuração do Servidor Web para a Render
 app = Flask('')
 @app.route('/')
-def home(): return "Sniper Online"
+def home(): return "Sniper Ativo e Operacional"
 
 def run_flask():
-    # A Render exige que o app rode na porta 10000 ou na definida pelo sistema
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-TOKEN = "8595782081:AAGjVk_NRdI5FQKFl4Z3Xc7wy1uZGf51mlw"
+# 2. Configurações do Bot (Token Novo Aplicado)
+TOKEN = "8595782081:AAEZ885Y-CEYV85Qd0WGDW50_qryE4gXyEs"
 PROXY_KEY = "0964b99b46c741438a03ee5d76442a8a"
 bot = telebot.TeleBot(TOKEN)
 
@@ -24,35 +24,33 @@ def buscar_gemas():
     proxy_url = f"https://api.scraperant.com/v2/general?url={url_gmgn}&x-api-key={PROXY_KEY}"
     try:
         r = requests.get(proxy_url, timeout=20)
-        return r.json().get('data', {}).get('tokens', [])
-    except:
+        if r.status_code == 200:
+            return r.json().get('data', {}).get('tokens', [])
+        return []
+    except Exception as e:
+        print(f"Erro ao buscar dados: {e}")
         return []
 
+# 3. Comando Start
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "🎯 **SNIPER ATIVADO**\nBuscando moedas...")
+    bot.reply_to(message, "🎯 **SNIPER PROFISSIONAL ATIVADO**\nMonitorando Smart Money (MCap $15k - $600k)...")
     vistos = set()
+    print(f"Bot iniciado pelo usuário: {message.chat.id}")
+    
     while True:
         try:
             tokens = buscar_gemas()
             for t in tokens:
                 addr = t.get('address')
                 mcap = t.get('market_cap', 0)
+                
+                # Filtro de Market Cap
                 if addr not in vistos and 15000 <= mcap <= 600000:
                     symbol = t.get('symbol', '???')
-                    msg = (f"💎 **GEMA DETECTADA**\n\n"
-                           f"**Token:** ${symbol}\n"
+                    name = t.get('name', 'Token')
+                    
+                    msg = (f"💎 **GEMA SMART MONEY DETECTADA**\n\n"
+                           f"**Token:** {name} (${symbol})\n"
                            f"**Market Cap:** ${mcap:,.0f}\n\n"
-                           f"🔗 [Analisar na GMGN](https://gmgn.ai/sol/token/{addr})")
-                    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
-                    vistos.add(addr)
-        except: pass
-        time.sleep(60)
-
-if __name__ == "__main__":
-    # Inicia o servidor web em segundo plano
-    t = Thread(target=run_flask)
-    t.start()
-    print("🤖 Robô iniciado!")
-    # Inicia o Telegram
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+                           f"🔗 [Analisar na GMGN](

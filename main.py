@@ -6,7 +6,7 @@ from flask import Flask
 from threading import Thread
 
 # ==========================================================
-# CONFIGURAÇÃO - SEU ID JÁ ESTÁ INSERIDO
+# CONFIGURAÇÃO FIXA - SEU ID JÁ ESTÁ AQUI
 # ==========================================================
 TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
 CHAT_ID = "5080696866" 
@@ -24,9 +24,11 @@ def get_market_data():
     """Busca tokens ativos na rede Solana via DexScreener"""
     try:
         url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-        response = requests.get(url, timeout=15).json()
+        # Aumentamos o timeout para evitar erro de conexão lenta
+        response = requests.get(url, timeout=20).json()
         return response.get('pairs', [])
-    except:
+    except Exception as e:
+        print(f"Erro ao buscar dados: {e}")
         return []
 
 def hunter_loop():
@@ -35,30 +37,35 @@ def hunter_loop():
     while True:
         try:
             pairs = get_market_data()
+            if not pairs:
+                time.sleep(30)
+                continue
+
             for pair in pairs:
+                # Verificação de segurança para garantir que o par é Solana
+                if pair.get('chainId') != 'solana':
+                    continue
+
                 token_address = pair['baseToken']['address']
                 
-                # Pula se já avisamos desse token
                 if token_address in seen_tokens:
                     continue
 
-                # --- FILTROS DE ELITE (Para não perder dinheiro) ---
+                # --- FILTROS DE ELITE ---
                 liquidity = pair.get('liquidity', {}).get('usd', 0)
                 mcap = pair.get('fdv', 0)
                 vol_1h = pair.get('volume', {}).get('h1', 0)
                 
-                # REGRAS:
-                # 1. Liquidez > $40k (Mínimo para ter saída)
-                # 2. Market Cap entre $60k e $800k (Potencial de Gema)
-                # 3. Volume forte (Pelo menos 15% do Market Cap em 1 hora)
+                # FILTRO PARA GANHAR DINHEIRO:
+                # Liquidez mínima de $40k para conseguir vender depois
                 if 40000 < liquidity < 400000 and 60000 < mcap < 800000:
+                    # Volume forte (mais de 15% do Market Cap na última hora)
                     if vol_1h > (mcap * 0.15):
                         
-                        # --- CÁLCULO DE ESTRATÉGIA ---
                         price = float(pair['priceUsd'])
                         target_2x = price * 2
                         target_5x = price * 5
-                        stop_loss = price * 0.70 # -30%
+                        stop_loss = price * 0.70 
                         
                         msg = (
                             f"🚨 **GEMA DETECTADA: {pair['baseToken']['symbol']}** 🚨\n"
@@ -80,7 +87,6 @@ def hunter_loop():
                         bot.send_message(CHAT_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
                         seen_tokens.add(token_address)
             
-            # Limpa memória para não travar
             if len(seen_tokens) > 500:
                 seen_tokens.clear()
                 
@@ -90,18 +96,15 @@ def hunter_loop():
         time.sleep(60) # Varredura a cada 1 minuto
 
 def run_flask():
-    """Mantém a Koyeb feliz (Health Check)"""
+    """Mantém a Koyeb feliz"""
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # Inicia o servidor de vida primeiro
+    # Inicia o servidor de vida primeiro para o Health Check da Koyeb não falhar
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
     
-    # Dá 5 segundos para o servidor estabilizar
     time.sleep(5)
-    
-    # Começa a caçar gemas
     hunter_loop()

@@ -7,7 +7,7 @@ from threading import Thread
 
 # --- CONFIGURAÇÃO ---
 TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
-CHAT_ID = "SEU_ID_AQUI"  # Mande /id para o bot @userinfobot para descobrir o seu
+CHAT_ID = "5080696866"  # Mande /id para o bot @userinfobot para descobrir o seu
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 

@@ -1,76 +1,85 @@
+
 import os
 import telebot
 import requests
-from flask import Flask
+import time
 from threading import Thread
 
+# --- CONFIGURAÇÃO ---
 TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
+CHAT_ID = 5080696866 # Você precisa colocar seu ID do Telegram aqui para receber os alertas
 bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
 
-@app.route('/')
-def index(): return "Sniper Bot Ativo"
-
-def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "🚀 **Monitor Sniper Pro Ativo**\nEnvie o contrato ou link da GMGN/DexScreener para análise rigorosa.")
-
-@bot.message_handler(func=lambda message: True)
-def analyze_token(message):
-    raw_text = message.text.strip()
-    # Extrai contrato de links ou texto puro
-    contract = raw_text.split('/')[-1].split('?')[0]
-    
-    msg_wait = bot.reply_to(message, f"🔍 **Iniciando auditoria no contrato:** `{contract}`...")
-
+def get_new_gems():
+    """Busca tokens recentes com filtros de segurança"""
     try:
-        # Busca dados na DexScreener
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{contract}"
-        data = requests.get(url).json()
-
-        if not data.get('pairs'):
-            bot.edit_message_text("❌ Token sem liquidez ou não encontrado.", message.chat.id, msg_wait.message_id)
-            return
-
-        pair = sorted(data['pairs'], key=lambda x: x.get('liquidity', {}).get('usd', 0), reverse=True)[0]
+        # Buscamos os pares mais ativos nas últimas horas
+        url = "https://api.dexscreener.com/latest/dex/search?q=solana"
+        response = requests.get(url).json()
         
-        # --- FILTROS DE ELITE (LÓGICA DE GANHO) ---
-        liquidity = pair.get('liquidity', {}).get('usd', 0)
-        mcap = pair.get('fdv', 0)
-        buys = pair.get('txns', {}).get('h24', {}).get('buys', 0)
-        sells = pair.get('txns', {}).get('h24', {}).get('sells', 0)
+        if not response.get('pairs'):
+            return []
+
+        valid_gems = []
+        for pair in response['pairs'][:20]: # Analisa os 20 mais recentes/ativos
+            liquidity = pair.get('liquidity', {}).get('usd', 0)
+            mcap = pair.get('fdv', 0)
+            volume_1h = pair.get('volume', {}).get('h1', 0)
+            
+            # --- FILTRO DE ELITE PARA NÃO PERDER DINHEIRO ---
+            # 1. Liquidez mínima de $30k (evita rugpulls básicos)
+            # 2. Market Cap entre $50k e $500k (potencial de gema)
+            # 3. Volume em 1h deve ser pelo menos 20% do Market Cap
+            if 30000 < liquidity < 500000 and 50000 < mcap < 800000:
+                if volume_1h > (mcap * 0.2):
+                    valid_gems.append(pair)
         
-        # Cálculo de Volume/Pressão de Compra
-        ratio = (buys / (buys + sells)) * 100 if (buys + sells) > 0 else 0
-        
-        # Alertas de Segurança Simples
-        is_safe = "✅ SEGURO" if liquidity > 50000 and mcap > 100000 else "⚠️ RISCO ALTO"
-        if liquidity < 10000: is_safe = "🚫 RUGPULL PROVÁVEL (Liquidez Baixa)"
-
-        report = (
-            f"📊 **RELATÓRIO DE MERCADO**\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"💎 **Status:** {is_safe}\n"
-            f"🌐 **Rede:** {pair['chainId'].upper()}\n\n"
-            f"💰 **Price:** `${pair['priceUsd']}`\n"
-            f"📈 **Market Cap:** `${mcap:,.0f}`\n"
-            f"💧 **Liquidez:** `${liquidity:,.0f}`\n\n"
-            f"📊 **Pressão de Compra:** `{ratio:.1f}%`\n"
-            f"🔄 **Transações (24h):** 🟢 {buys} | 🔴 {sells}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🔗 [GMGN.ai](https://gmgn.ai/sol/token/{contract}) | [DexScreener]({pair['url']})\n"
-            f"💡 *Dica: Se a liquidez for < 10% do MCap, cuidado!*"
-        )
-
-        bot.edit_message_text(report, message.chat.id, msg_wait.message_id, parse_mode="Markdown", disable_web_page_preview=True)
-
+        return valid_gems
     except Exception as e:
-        bot.edit_message_text(f"⚠️ Erro na análise: {str(e)}", message.chat.id, msg_wait.message_id)
+        print(f"Erro no Hunter: {e}")
+        return []
+
+def scanner_loop():
+    """Loop infinito que monitora o mercado e envia alertas"""
+    seen_tokens = set()
+    print("Scanner de Gemas Iniciado...")
+    
+    while True:
+        gems = get_new_gems()
+        for gem in gems:
+            contract = gem['baseToken']['address']
+            if contract not in seen_tokens:
+                # --- LÓGICA DE TRADING (ENTRADA E SAÍDA) ---
+                price = float(gem['priceUsd'])
+                entry_price = price * 1.05 # Sugestão: entrar com 5% de margem
+                target_1 = price * 2.0    # Saída 1: 2x (100% lucro)
+                target_2 = price * 5.0    # Saída 2: 5x (Moonshot)
+                stop_loss = price * 0.7   # Stop: -30%
+                
+                msg = (
+                    f"🚨 **NOVA GEMA DETECTADA** 🚨\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 **Token:** {gem['baseToken']['name']} ({gem['baseToken']['symbol']})\n"
+                    f"📊 **Market Cap:** ${gem['fdv']:,.0f}\n"
+                    f"💧 **Liquidez:** ${gem['liquidity']['usd']:,.0f}\n"
+                    f"📈 **Volume 1h:** ${gem['volume']['h1']:,.0f}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 **ESTRATÉGIA DE TRADE:**\n"
+                    f"📥 **Entrada sugerida:** `${entry_price:.8f}`\n"
+                    f"💰 **Saída (Alvo 1):** `${target_1:.8f}` (2x)\n"
+                    f"🚀 **Saída (Alvo 2):** `${target_2:.8f}` (5x)\n"
+                    f"🛑 **Stop Loss:** `${stop_loss:.8f}`\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🔗 [GMGN.ai](https://gmgn.ai/sol/token/{contract})\n"
+                    f"🔗 [DexScreener]({gem['url']})\n"
+                )
+                
+                bot.send_message(CHAT_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
+                seen_tokens.add(contract)
+        
+        time.sleep(60) # Verifica a cada 1 minuto
 
 if __name__ == "__main__":
-    Thread(target=run).start()
+    # Inicia o scanner em uma thread separada
+    Thread(target=scanner_loop).start()
     bot.infinity_polling()

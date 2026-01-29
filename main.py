@@ -4,60 +4,73 @@ import requests
 from flask import Flask
 from threading import Thread
 
-# --- CONFIGURAÇÃO ---
 TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# --- SERVIDOR PARA MANTER ONLINE (HEALTH CHECK) ---
 @app.route('/')
-def index():
-    return "Sniper Bot is Running!"
+def index(): return "Sniper Bot Ativo"
 
 def run():
-    # A Koyeb fornece a porta automaticamente, mas usamos 8080 como padrão
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- COMANDOS DO BOT ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "🎯 Sniper Bot Ativo! Envie o endereço do contrato (Solana) para analisar.")
+    bot.reply_to(message, "🚀 **Monitor Sniper Pro Ativo**\nEnvie o contrato ou link da GMGN/DexScreener para análise rigorosa.")
 
-@bot.message_handler(func=lambda message: len(message.text) > 30) # Filtro simples para contratos
+@bot.message_handler(func=lambda message: True)
 def analyze_token(message):
-    contract = message.text.strip()
-    bot.reply_to(message, f"🔍 Analisando: `{contract}`...", parse_mode="Markdown")
+    raw_text = message.text.strip()
+    # Extrai contrato de links ou texto puro
+    contract = raw_text.split('/')[-1].split('?')[0]
     
-    try:
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{contract}"
-        response = requests.get(url).json()
-        
-        if response.get('pairs'):
-            pair = response['pairs'][0]
-            price = pair.get('priceUsd', 'N/A')
-            liquidity = pair.get('liquidity', {}).get('usd', 0)
-            mcap = pair.get('fdv', 0)
-            
-            msg = (
-                f"✅ **Token Encontrado!**\n\n"
-                f"💵 Preço: ${price}\n"
-                f"💧 Liquidez: ${liquidity:,.2f}\n"
-                f"📊 Market Cap: ${mcap:,.2f}\n"
-                f"🔗 [Ver na DexScreener]({pair['url']})"
-            )
-            bot.send_message(message.chat.id, msg, parse_mode="Markdown")
-        else:
-            bot.send_message(message.chat.id, "❌ Token não encontrado ou sem liquidez.")
-    except Exception as e:
-        bot.send_message(message.chat.id, "⚠️ Erro ao buscar dados.")
+    msg_wait = bot.reply_to(message, f"🔍 **Iniciando auditoria no contrato:** `{contract}`...")
 
-# --- INICIALIZAÇÃO ---
+    try:
+        # Busca dados na DexScreener
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{contract}"
+        data = requests.get(url).json()
+
+        if not data.get('pairs'):
+            bot.edit_message_text("❌ Token sem liquidez ou não encontrado.", message.chat.id, msg_wait.message_id)
+            return
+
+        pair = sorted(data['pairs'], key=lambda x: x.get('liquidity', {}).get('usd', 0), reverse=True)[0]
+        
+        # --- FILTROS DE ELITE (LÓGICA DE GANHO) ---
+        liquidity = pair.get('liquidity', {}).get('usd', 0)
+        mcap = pair.get('fdv', 0)
+        buys = pair.get('txns', {}).get('h24', {}).get('buys', 0)
+        sells = pair.get('txns', {}).get('h24', {}).get('sells', 0)
+        
+        # Cálculo de Volume/Pressão de Compra
+        ratio = (buys / (buys + sells)) * 100 if (buys + sells) > 0 else 0
+        
+        # Alertas de Segurança Simples
+        is_safe = "✅ SEGURO" if liquidity > 50000 and mcap > 100000 else "⚠️ RISCO ALTO"
+        if liquidity < 10000: is_safe = "🚫 RUGPULL PROVÁVEL (Liquidez Baixa)"
+
+        report = (
+            f"📊 **RELATÓRIO DE MERCADO**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💎 **Status:** {is_safe}\n"
+            f"🌐 **Rede:** {pair['chainId'].upper()}\n\n"
+            f"💰 **Price:** `${pair['priceUsd']}`\n"
+            f"📈 **Market Cap:** `${mcap:,.0f}`\n"
+            f"💧 **Liquidez:** `${liquidity:,.0f}`\n\n"
+            f"📊 **Pressão de Compra:** `{ratio:.1f}%`\n"
+            f"🔄 **Transações (24h):** 🟢 {buys} | 🔴 {sells}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 [GMGN.ai](https://gmgn.ai/sol/token/{contract}) | [DexScreener]({pair['url']})\n"
+            f"💡 *Dica: Se a liquidez for < 10% do MCap, cuidado!*"
+        )
+
+        bot.edit_message_text(report, message.chat.id, msg_wait.message_id, parse_mode="Markdown", disable_web_page_preview=True)
+
+    except Exception as e:
+        bot.edit_message_text(f"⚠️ Erro na análise: {str(e)}", message.chat.id, msg_wait.message_id)
+
 if __name__ == "__main__":
-    # Inicia o servidor Flask em uma thread separada
-    t = Thread(target=run)
-    t.start()
-    
-    # Inicia o Polling do Telegram
-    print("Bot iniciado...")
+    Thread(target=run).start()
     bot.infinity_polling()

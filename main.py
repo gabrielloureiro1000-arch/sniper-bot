@@ -1,85 +1,92 @@
-
 import os
+import time
 import telebot
 import requests
-import time
+from flask import Flask
 from threading import Thread
 
 # --- CONFIGURAÇÃO ---
 TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
-CHAT_ID = 5080696866 # Você precisa colocar seu ID do Telegram aqui para receber os alertas
+CHAT_ID = "SEU_ID_AQUI"  # Mande /id para o bot @userinfobot para descobrir o seu
 bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-def get_new_gems():
-    """Busca tokens recentes com filtros de segurança"""
+# Memória temporária para não repetir o mesmo token
+seen_tokens = set()
+
+@app.route('/')
+def health_check(): return "Hunter Online", 200
+
+def get_market_data():
+    """Busca os tokens mais promissores da rede Solana"""
     try:
-        # Buscamos os pares mais ativos nas últimas horas
+        # Busca os tokens com maior volume/atividade recente na Solana
         url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-        response = requests.get(url).json()
-        
-        if not response.get('pairs'):
-            return []
-
-        valid_gems = []
-        for pair in response['pairs'][:20]: # Analisa os 20 mais recentes/ativos
-            liquidity = pair.get('liquidity', {}).get('usd', 0)
-            mcap = pair.get('fdv', 0)
-            volume_1h = pair.get('volume', {}).get('h1', 0)
-            
-            # --- FILTRO DE ELITE PARA NÃO PERDER DINHEIRO ---
-            # 1. Liquidez mínima de $30k (evita rugpulls básicos)
-            # 2. Market Cap entre $50k e $500k (potencial de gema)
-            # 3. Volume em 1h deve ser pelo menos 20% do Market Cap
-            if 30000 < liquidity < 500000 and 50000 < mcap < 800000:
-                if volume_1h > (mcap * 0.2):
-                    valid_gems.append(pair)
-        
-        return valid_gems
-    except Exception as e:
-        print(f"Erro no Hunter: {e}")
+        response = requests.get(url, timeout=10).json()
+        return response.get('pairs', [])
+    except:
         return []
 
-def scanner_loop():
-    """Loop infinito que monitora o mercado e envia alertas"""
-    seen_tokens = set()
-    print("Scanner de Gemas Iniciado...")
-    
+def scan_and_alert():
+    """Filtro de Elite: Só envia o que tem potencial real"""
+    print("Iniciando monitoramento de mercado...")
     while True:
-        gems = get_new_gems()
-        for gem in gems:
-            contract = gem['baseToken']['address']
-            if contract not in seen_tokens:
-                # --- LÓGICA DE TRADING (ENTRADA E SAÍDA) ---
-                price = float(gem['priceUsd'])
-                entry_price = price * 1.05 # Sugestão: entrar com 5% de margem
-                target_1 = price * 2.0    # Saída 1: 2x (100% lucro)
-                target_2 = price * 5.0    # Saída 2: 5x (Moonshot)
-                stop_loss = price * 0.7   # Stop: -30%
-                
-                msg = (
-                    f"🚨 **NOVA GEMA DETECTADA** 🚨\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"💎 **Token:** {gem['baseToken']['name']} ({gem['baseToken']['symbol']})\n"
-                    f"📊 **Market Cap:** ${gem['fdv']:,.0f}\n"
-                    f"💧 **Liquidez:** ${gem['liquidity']['usd']:,.0f}\n"
-                    f"📈 **Volume 1h:** ${gem['volume']['h1']:,.0f}\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🎯 **ESTRATÉGIA DE TRADE:**\n"
-                    f"📥 **Entrada sugerida:** `${entry_price:.8f}`\n"
-                    f"💰 **Saída (Alvo 1):** `${target_1:.8f}` (2x)\n"
-                    f"🚀 **Saída (Alvo 2):** `${target_2:.8f}` (5x)\n"
-                    f"🛑 **Stop Loss:** `${stop_loss:.8f}`\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🔗 [GMGN.ai](https://gmgn.ai/sol/token/{contract})\n"
-                    f"🔗 [DexScreener]({gem['url']})\n"
-                )
-                
-                bot.send_message(CHAT_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
-                seen_tokens.add(contract)
+        pairs = get_market_data()
+        for pair in pairs:
+            token_address = pair['baseToken']['address']
+            
+            if token_address in seen_tokens:
+                continue
+
+            # --- SEUS FILTROS DE LUCRO ---
+            liquidity = pair.get('liquidity', {}).get('usd', 0)
+            mcap = pair.get('fdv', 0)
+            vol_1h = pair.get('volume', {}).get('h1', 0)
+            
+            # FILTRO: Liquidez > $40k, MCap entre $60k e $600k (Gema), Volume Forte
+            if 40000 < liquidity < 400000 and 60000 < mcap < 800000:
+                if vol_1h > (mcap * 0.15): # Volume deve ser > 15% do Market Cap
+                    
+                    # --- CÁLCULO DE ENTRADA E SAÍDA ---
+                    price = float(pair['priceUsd'])
+                    target_2x = price * 2
+                    target_5x = price * 5
+                    stop_loss = price * 0.65 # -35%
+                    
+                    msg = (
+                        f"🚀 **GEMA VALIDADA DETECTADA** 🚀\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"💎 **Token:** {pair['baseToken']['name']} ({pair['baseToken']['symbol']})\n"
+                        f"📊 **Mkt Cap:** `${mcap:,.0f}`\n"
+                        f"💧 **Liquidez:** `${liquidity:,.0f}`\n"
+                        f"🔥 **Vol 1h:** `${vol_1h:,.0f}`\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🟢 **PONTO DE ENTRADA:** `{price:.10f}`\n"
+                        f"🎯 **ALVO 1 (2x):** `{target_2x:.10f}`\n"
+                        f"🚀 **ALVO 2 (5x):** `{target_5x:.10f}`\n"
+                        f"🛑 **STOP LOSS:** `{stop_loss:.10f}`\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🔗 [Analisar na GMGN](https://gmgn.ai/sol/token/{token_address})\n"
+                        f"🔗 [Gráfico DexScreener]({pair['url']})\n"
+                        f"⚠️ *Checar se LP está Burned na GMGN!*"
+                    )
+                    
+                    try:
+                        bot.send_message(CHAT_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
+                        seen_tokens.add(token_address)
+                    except:
+                        pass
         
-        time.sleep(60) # Verifica a cada 1 minuto
+        # Limpa o histórico a cada 200 tokens para não pesar a memória
+        if len(seen_tokens) > 200: seen_tokens.clear()
+        time.sleep(60) # Varredura a cada 1 minuto
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # Inicia o scanner em uma thread separada
-    Thread(target=scanner_loop).start()
-    bot.infinity_polling()
+    # Inicia o Servidor de Health Check (Koyeb precisa disso)
+    Thread(target=run_flask).start()
+    # Inicia o Scanner Automático
+    scan_and_alert()

@@ -1,53 +1,63 @@
+import os
 import telebot
 import requests
-import time
-import os
 from flask import Flask
 from threading import Thread
 
-# Servidor Web para manter o robô vivo
-app = Flask('')
-@app.route('/')
-def home(): return "Sniper Ativo"
+# --- CONFIGURAÇÃO ---
+TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-def run_flask():
+# --- SERVIDOR PARA MANTER ONLINE (HEALTH CHECK) ---
+@app.route('/')
+def index():
+    return "Sniper Bot is Running!"
+
+def run():
+    # A Koyeb fornece a porta automaticamente, mas usamos 8080 como padrão
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# Token do Telegram
-TOKEN = "8595782081:AAEZ885Y-CEYV85Qd0WGDW50_qryE4gXyEs"
-bot = telebot.TeleBot(TOKEN)
-
-def buscar_oportunidades():
-    # API da DexScreener é gratuita e mais estável que 'raspar' site
-    url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code == 200:
-            return r.json().get('pairs', [])
-        return []
-    except:
-        return []
-
+# --- COMANDOS DO BOT ---
 @bot.message_handler(commands=['start'])
-def start(message):
-    bot.reply_to(message, "🎯 **SNIPER KOYEB ATIVADO**\nBuscando gemas na Solana...")
-    enviados = set()
-    while True:
-        try:
-            tokens = buscar_oportunidades()
-            for t in tokens:
-                addr = t.get('baseToken', {}).get('address')
-                mcap = t.get('fdv', 0)
-                # Filtro: $10k a $500k
-                if addr not in enviados and 10000 <= mcap <= 500000:
-                    symbol = t.get('baseToken', {}).get('symbol')
-                    msg = f"🚀 **GEMA:** ${symbol}\n**MCap:** ${mcap:,.0f}\n🔗 [Analisar](https://gmgn.ai/sol/token/{addr})"
-                    bot.send_message(message.chat.id, msg)
-                    enviados.add(addr)
-        except: pass
-        time.sleep(60)
+def send_welcome(message):
+    bot.reply_to(message, "🎯 Sniper Bot Ativo! Envie o endereço do contrato (Solana) para analisar.")
 
+@bot.message_handler(func=lambda message: len(message.text) > 30) # Filtro simples para contratos
+def analyze_token(message):
+    contract = message.text.strip()
+    bot.reply_to(message, f"🔍 Analisando: `{contract}`...", parse_mode="Markdown")
+    
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{contract}"
+        response = requests.get(url).json()
+        
+        if response.get('pairs'):
+            pair = response['pairs'][0]
+            price = pair.get('priceUsd', 'N/A')
+            liquidity = pair.get('liquidity', {}).get('usd', 0)
+            mcap = pair.get('fdv', 0)
+            
+            msg = (
+                f"✅ **Token Encontrado!**\n\n"
+                f"💵 Preço: ${price}\n"
+                f"💧 Liquidez: ${liquidity:,.2f}\n"
+                f"📊 Market Cap: ${mcap:,.2f}\n"
+                f"🔗 [Ver na DexScreener]({pair['url']})"
+            )
+            bot.send_message(message.chat.id, msg, parse_mode="Markdown")
+        else:
+            bot.send_message(message.chat.id, "❌ Token não encontrado ou sem liquidez.")
+    except Exception as e:
+        bot.send_message(message.chat.id, "⚠️ Erro ao buscar dados.")
+
+# --- INICIALIZAÇÃO ---
 if __name__ == "__main__":
-    Thread(target=run_flask).start()
+    # Inicia o servidor Flask em uma thread separada
+    t = Thread(target=run)
+    t.start()
+    
+    # Inicia o Polling do Telegram
+    print("Bot iniciado...")
     bot.infinity_polling()

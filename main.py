@@ -1,4 +1,3 @@
-
 import telebot
 import requests
 import time
@@ -6,54 +5,49 @@ import os
 from flask import Flask
 from threading import Thread
 
+# Servidor Web para manter o robô vivo
 app = Flask('')
 @app.route('/')
-def home(): return "Sniper Online"
+def home(): return "Sniper Ativo"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# Puxa das configurações da Render (Environment) ou usa o reserva
-TOKEN = os.environ.get('TELEGRAM_TOKEN', "8595782081:AAEZ885Y-CEYV85Qd0WGDW50_qryE4gXyEs")
-PROXY_KEY = "0964b99b46c741438a03ee5d76442a8a"
+# Token do Telegram
+TOKEN = "8595782081:AAEZ885Y-CEYV85Qd0WGDW50_qryE4gXyEs"
 bot = telebot.TeleBot(TOKEN)
 
-def buscar_gemas():
-    url_gmgn = "https://gmgn.ai/api/v1/token_trending/sol?period=1h&limit=20"
-    proxy_url = f"https://api.scraperant.com/v2/general?url={url_gmgn}&x-api-key={PROXY_KEY}"
+def buscar_oportunidades():
+    # API da DexScreener é gratuita e mais estável que 'raspar' site
+    url = "https://api.dexscreener.com/latest/dex/search?q=solana"
     try:
-        r = requests.get(proxy_url, timeout=20)
+        r = requests.get(url, timeout=15)
         if r.status_code == 200:
-            return r.json().get('data', {}).get('tokens', [])
+            return r.json().get('pairs', [])
         return []
-    except Exception as e:
-        print(f"Aguardando rede... {e}")
+    except:
         return []
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "🎯 **SNIPER ATIVADO**\nBuscando gemas entre $15k e $600k...")
-    vistos = set()
+    bot.reply_to(message, "🎯 **SNIPER KOYEB ATIVADO**\nBuscando gemas na Solana...")
+    enviados = set()
     while True:
         try:
-            tokens = buscar_gemas()
+            tokens = buscar_oportunidades()
             for t in tokens:
-                addr = t.get('address')
-                mcap = t.get('market_cap', 0)
-                if addr not in vistos and 15000 <= mcap <= 600000:
-                    symbol = t.get('symbol', '???')
-                    msg = (f"💎 **NOVA GEMA**\n\n"
-                           f"**Token:** ${symbol}\n"
-                           f"**MCap:** ${mcap:,.0f}\n\n"
-                           f"🔗 [Analisar na GMGN](https://gmgn.ai/sol/token/{addr})")
-                    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
-                    vistos.add(addr)
+                addr = t.get('baseToken', {}).get('address')
+                mcap = t.get('fdv', 0)
+                # Filtro: $10k a $500k
+                if addr not in enviados and 10000 <= mcap <= 500000:
+                    symbol = t.get('baseToken', {}).get('symbol')
+                    msg = f"🚀 **GEMA:** ${symbol}\n**MCap:** ${mcap:,.0f}\n🔗 [Analisar](https://gmgn.ai/sol/token/{addr})"
+                    bot.send_message(message.chat.id, msg)
+                    enviados.add(addr)
         except: pass
         time.sleep(60)
 
 if __name__ == "__main__":
     Thread(target=run_flask).start()
-    print("🤖 Robô tentando conexão final...")
-    # O infinity_polling evita que o bot caia por instabilidade da Render
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    bot.infinity_polling()

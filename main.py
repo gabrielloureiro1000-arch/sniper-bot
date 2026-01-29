@@ -6,7 +6,7 @@ from flask import Flask
 from threading import Thread
 
 # ==========================================================
-# CONFIGURAÇÃO FIXA - ID: 5080696866
+# CONFIGURAÇÃO FINAL - ID: 5080696866
 # ==========================================================
 TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
 CHAT_ID = "5080696866" 
@@ -16,8 +16,9 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 seen_tokens = set()
 
-# COMANDO DE LIMPEZA PARA DESTRAVAR
+# LIMPEZA OBRIGATÓRIA PARA MATAR O ERRO 409
 try:
+    print("Limpando conexões anteriores...")
     bot.remove_webhook()
     time.sleep(2)
 except:
@@ -25,16 +26,11 @@ except:
 
 @app.route('/')
 def health_check():
-    return "Hunter Pro Online", 200
-
-# TESTE MANUAL: Digite /status no Telegram para ver se ele responde
-@bot.message_handler(commands=['status'])
-def send_status(message):
-    bot.reply_to(message, "✅ O Hunter está online e monitorando a Solana!")
+    return "Hunter Ativo", 200
 
 def get_market_data():
     try:
-        # Busca tokens ativos
+        # Foco total em tokens da Solana
         url = "https://api.dexscreener.com/latest/dex/search?q=solana"
         response = requests.get(url, timeout=20).json()
         return response.get('pairs', [])
@@ -42,12 +38,11 @@ def get_market_data():
         return []
 
 def hunter_loop():
-    """Monitora o mercado e envia alertas automáticos"""
-    # Aviso imediato no seu Telegram que o bot ligou
+    """Monitoramento automático de lucros"""
     try:
-        bot.send_message(CHAT_ID, "🚀 **BOT LIGADO!** Iniciando varredura na Solana...")
-    except Exception as e:
-        print(f"Erro ao enviar msg inicial: {e}")
+        bot.send_message(CHAT_ID, "🚀 **SISTEMA ONLINE!** O Hunter começou a varredura agora.")
+    except:
+        print("Erro: Verifique se você já deu /start no seu bot no Telegram.")
 
     while True:
         try:
@@ -55,16 +50,15 @@ def hunter_loop():
             for pair in pairs:
                 if pair.get('chainId') != 'solana': continue
                 
-                token_address = pair['baseToken']['address']
-                if token_address in seen_tokens: continue
+                addr = pair['baseToken']['address']
+                if addr in seen_tokens: continue
 
-                # Filtros de Lucro
                 liq = pair.get('liquidity', {}).get('usd', 0)
                 mcap = pair.get('fdv', 0)
                 vol = pair.get('volume', {}).get('h1', 0)
                 
-                # Se atender aos requisitos, avisa você
-                if 30000 < liq < 500000 and 60000 < mcap < 1000000:
+                # FILTRO DE SEGURANÇA (Gemas reais com liquidez)
+                if 35000 < liq < 450000 and 65000 < mcap < 900000:
                     if vol > (mcap * 0.12):
                         price = float(pair['priceUsd'])
                         
@@ -76,10 +70,10 @@ def hunter_loop():
                             f"🎯 **ALVO (2x):** `{price*2:.10f}`\n"
                             f"🛑 **STOP:** `{price*0.7:.10f}`\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
-                            f"🔗 [GMGN.ai](https://gmgn.ai/sol/token/{token_address})\n"
+                            f"🔗 [Link GMGN.ai](https://gmgn.ai/sol/token/{addr})\n"
                         )
                         bot.send_message(CHAT_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
-                        seen_tokens.add(token_address)
+                        seen_tokens.add(addr)
             
             if len(seen_tokens) > 500: seen_tokens.clear()
         except:
@@ -91,14 +85,14 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # Inicia Servidor de Vida
+    # 1. Inicia servidor de vida para a Koyeb
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
     
-    # Inicia Escuta de Comandos (/status)
-    Thread(target=bot.infinity_polling).start()
+    # 2. Inicia recebimento de comandos
+    Thread(target=bot.infinity_polling, kwargs={'skip_pending': True}).start()
     
-    # Inicia o Caçador de Moedas
+    # 3. Inicia o caçador
     time.sleep(5)
     hunter_loop()

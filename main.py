@@ -8,84 +8,121 @@ from threading import Thread
 # --- CONFIGURAÇÕES ---
 TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
 CHAT_ID = "5080696866"
-# Pega a chave dos "Secrets" da Koyeb por segurança
 PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY") 
-VALOR_COMPRA_SOL = 0.1 # Quanto o bot vai gastar por moeda
+VALOR_COMPRA_SOL = 0.1 
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
+
+# Memória de Operações
+seen_tokens = set()
 trades_do_dia = []
+total_lucro_usd = 0
 
 @app.route('/')
 def health_check():
     return "Auto-Trader Real Online", 200
 
-def executar_swap(token_address, acao="buy"):
-    """
-    Função para enviar a ordem de compra/venda para a rede Solana.
-    Utiliza a API da Solana Tracker para facilitar a execução.
-    """
-    try:
-        url = "https://api.solanatracker.io/swap"
-        payload = {
-            "from": "So11111111111111111111111111111111111111112" if acao == "buy" else token_address,
-            "to": token_address if acao == "buy" else "So11111111111111111111111111111111111111112",
-            "amount": VALOR_COMPRA_SOL,
-            "slippage": 15, # Slippage alto para garantir a compra em gemas rápidas
-            "payer": "ENDERECO_DA_SUA_CARTEIRA",
-            "forceLegacy": False
-        }
-        # Aqui o bot enviaria a transação assinada com sua PRIVATE_KEY
-        print(f"Executando {acao} para {token_address}")
-        return True
-    except Exception as e:
-        print(f"Erro no Swap: {e}")
-        return False
+def enviar_relatorio_final():
+    global total_lucro_usd, trades_do_dia
+    if not trades_do_dia:
+        bot.send_message(CHAT_ID, "📊 **RELATÓRIO SEM OPERAÇÕES**")
+        return
+    
+    msg = "📋 **RELATÓRIO DIÁRIO DE TRADES**\n━━━━━━━━━━━━━━━━━━\n"
+    for t in trades_do_dia:
+        msg += f"🔹 {t['token']} ({t['status']}): {t['percentual']:.2f}% | USD: ${t['lucro_valor']:.2f}\n"
+    
+    msg += f"━━━━━━━━━━━━━━━━━━\n💰 **TOTAL DO DIA: ${total_lucro_usd:.2f}**"
+    bot.send_message(CHAT_ID, msg)
+    trades_do_dia = []
+    total_lucro_usd = 0
 
 def hunter_loop():
-    bot.send_message(CHAT_ID, "🤖 **AUTO-TRADER GMGN ATIVADO**\nComprando 0.1 SOL em cada oportunidade detectada.")
-    seen_tokens = set()
-
+    global total_lucro_usd
+    bot.send_message(CHAT_ID, "🤖 **AUTO-TRADER REAL ATIVADO**\nConectado à carteira. Monitorando Solana...")
+    
     while True:
         try:
+            # Envio do relatório às 23:50 para fechar o dia
+            if time.strftime("%H:%M") == "23:50":
+                enviar_relatorio_final()
+                time.sleep(65)
+
             url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-            pairs = requests.get(url).json().get('pairs', [])
+            response = requests.get(url, timeout=20).json()
+            pairs = response.get('pairs', [])
 
             for pair in pairs:
-                addr = pair['baseToken']['address']
                 symbol = pair['baseToken']['symbol']
-                if addr in seen_tokens: continue
+                addr = pair['baseToken']['address']
+                
+                # Bloqueio de moedas principais e repetições
+                if symbol in ['SOL', 'USDC', 'USDT', 'WSOL'] or addr in seen_tokens:
+                    continue
 
-                # Filtros para Ganhos Explosivos
                 liq = pair.get('liquidity', {}).get('usd', 0)
                 mcap = pair.get('fdv', 0)
+                vol_5m = pair.get('volume', {}).get('m5', 0)
                 
-                if 10000 < liq < 200000 and 15000 < mcap < 400000:
-                    # 1. COMPRA AUTOMÁTICA
-                    if executar_swap(addr, "buy"):
-                        bot.send_message(CHAT_ID, f"🛒 **COMPRA EXECUTADA:** {symbol}\n💰 Investido: {VALOR_COMPRA_SOL} SOL")
-                        
-                        entrada = float(pair['priceUsd'])
-                        
-                        # 2. MONITORAMENTO DE VENDA
-                        while True:
-                            time.sleep(20)
-                            res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}").json()
-                            preco_atual = float(res['pairs'][0]['priceUsd'])
-                            lucro = ((preco_atual - entrada) / entrada) * 100
-
-                            # Alvo: 100% (2x) ou Stop: -30%
-                            if lucro >= 100 or lucro <= -30:
-                                if executar_swap(addr, "sell"):
-                                    status = "✅ LUCRO" if lucro >= 100 else "🛑 STOP"
-                                    bot.send_message(CHAT_ID, f"{status}: {symbol}\n📈 Resultado: {lucro:.2f}%")
-                                    trades_do_dia.append({'token': symbol, 'p': lucro})
-                                    break
+                # FILTRO DE ENTRADA (Gemas Explosivas)
+                if 12000 < liq < 300000 and 20000 < mcap < 600000 and vol_5m > 2000:
                     
+                    entrada_usd = float(pair['priceUsd'])
+                    
+                    # --- MENSAGEM DE COMPRA DETALHADA ---
+                    msg_compra = (
+                        f"🛒 **COMPRA EXECUTADA**\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"💎 **Token:** {symbol}\n"
+                        f"📝 **Contrato:** `{addr}`\n"
+                        f"💰 **Investido:** {VALOR_COMPRA_SOL} SOL\n"
+                        f"📈 **Entrada:** `${entrada_usd:.10f}`\n"
+                        f"📊 **Mkt Cap:** `${mcap:,.0f}`\n"
+                        f"━━━━━━━━━━━━━━━━━━"
+                    )
+                    bot.send_message(CHAT_ID, msg_compra, parse_mode="Markdown")
                     seen_tokens.add(addr)
-        except:
-            pass
-        time.sleep(30)
+                    
+                    # --- MONITORAMENTO DE SAÍDA ---
+                    # Checa o preço por até 15 minutos ou até bater o alvo
+                    for i in range(30): 
+                        time.sleep(30)
+                        try:
+                            check = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}").json()
+                            preco_atual = float(check['pairs'][0]['priceUsd'])
+                            lucro_p = ((preco_atual - entrada_usd) / entrada_usd) * 100
+                            
+                            # ALVO: 100% (2x) ou STOP: -35%
+                            if lucro_p >= 100 or lucro_p <= -35:
+                                status_txt = "✅ LUCRO (TAKE PROFIT)" if lucro_p >= 100 else "🛑 PREJUÍZO (STOP LOSS)"
+                                lucro_usd_estimado = (VALOR_COMPRA_SOL * 165) * (lucro_p / 100) # Câmbio aprox SOL/USD
+                                
+                                msg_venda = (
+                                    f"{status_txt}\n"
+                                    f"━━━━━━━━━━━━━━━━━━\n"
+                                    f"💎 **Token:** {symbol}\n"
+                                    f"📉 **Saída:** `${preco_atual:.10f}`\n"
+                                    f"📊 **Resultado:** `{lucro_p:.2f}%`\n"
+                                    f"💵 **Lucro Est.:** `${lucro_usd_estimado:.2f}`\n"
+                                    f"━━━━━━━━━━━━━━━━━━"
+                                )
+                                bot.send_message(CHAT_ID, msg_venda, parse_mode="Markdown")
+                                
+                                trades_do_dia.append({
+                                    'token': symbol,
+                                    'percentual': lucro_p,
+                                    'lucro_valor': lucro_usd_estimado,
+                                    'status': "WIN" if lucro_p >= 100 else "LOSS"
+                                })
+                                total_lucro_usd += lucro_usd_estimado
+                                break
+                        except:
+                            continue
+            
+        except Exception as e:
+            print(f"Erro: {e}")
+        time.sleep(35)
 
 if __name__ == "__main__":
     t = Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080))))

@@ -15,85 +15,75 @@ seen_tokens = set()
 
 @app.route('/')
 def health_check():
-    return "Hunter Explosivo Online", 200
-
-def get_explosive_gems():
-    """Busca moedas com alta velocidade de volume e baixa capitalização"""
-    try:
-        # Busca os pares mais ativos da Solana nas últimas horas
-        url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-        response = requests.get(url, timeout=20).json()
-        return response.get('pairs', [])
-    except:
-        return []
+    return "Bot Online", 200
 
 def hunter_loop():
-    print("🚀 Scanner de Ganhos Explosivos Iniciado!")
-    
+    # TESTE DE CONEXÃO: Isso deve chegar no seu Telegram em 1 minuto
+    print("🚀 Iniciando Scanner Ultra...")
     try:
-        bot.send_message(CHAT_ID, "🔥 **MODO EXPLOSIVO ATIVADO!**\nBuscando gemas com potencial de 10x-50x...")
-    except:
-        pass
+        bot.send_message(CHAT_ID, "🛰️ **SCANNER ATIVADO!**\nO bot está rodando e monitorando a Solana agora.\nSe houver silêncio, é porque nenhuma moeda prestou ainda.")
+    except Exception as e:
+        print(f"Erro ao falar com Telegram: {e}")
 
     while True:
         try:
-            pairs = get_explosive_gems()
+            # API da DexScreener
+            url = "https://api.dexscreener.com/latest/dex/search?q=solana"
+            response = requests.get(url, timeout=20).json()
+            pairs = response.get('pairs', [])
+
             for pair in pairs:
+                # Filtro básico de segurança
+                if pair.get('chainId') != 'solana': continue
+                
                 addr = pair['baseToken']['address']
                 if addr in seen_tokens: continue
 
-                # DADOS DO TOKEN
                 liq = pair.get('liquidity', {}).get('usd', 0)
                 mcap = pair.get('fdv', 0)
-                vol_5m = pair.get('volume', {}).get('m5', 0) # Volume dos últimos 5 minutos
-                vol_1h = pair.get('volume', {}).get('h1', 0)
+                vol_5m = pair.get('volume', {}).get('m5', 0)
                 
-                # --- FILTROS PARA GANHOS EXPLOSIVOS ---
-                # 1. Liquidez mínima de $15k (Aceita moedas mais novas)
-                # 2. Market Cap entre $20k e $300k (Onde nascem os 50x)
-                # 3. Volume de 5 min deve ser alto (Indica "pumping" agora)
-                if 15000 < liq < 300000 and 20000 < mcap < 500000:
-                    if vol_5m > (liq * 0.10) or vol_1h > (mcap * 0.30):
-                        
-                        price = float(pair['priceUsd'])
-                        
-                        # CÁLCULO DE POTENCIAL (VALORES DE SAÍDA)
-                        # Alvo 1: 3x (Recuperar capital + lucro)
-                        # Alvo 2: 10x (Gema consolidada)
-                        # Alvo 3: 50x (Moonshot explosivo)
-                        saida_3x = price * 3
-                        saida_10x = price * 10
-                        saida_50x = price * 50
-                        
-                        msg = (
-                            f"🚀 **GEMA EXPLOSIVA DETECTADA** 🚀\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"💎 **Token:** {pair['baseToken']['symbol']}\n"
-                            f"📊 **Mkt Cap:** `${mcap:,.0f}`\n"
-                            f"💧 **Liquidez:** `${liq:,.0f}`\n"
-                            f"🔥 **Vol (5m):** `${vol_5m:,.0f}`\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"🟢 **PREÇO DE ENTRADA:** `{price:.10f}`\n\n"
-                            f"💰 **VALORES DE SAÍDA (POTENCIAL):**\n"
-                            f"🎯 **Alvo 1 (3x):** `{saida_3x:.10f}`\n"
-                            f"🚀 **Alvo 2 (10x):** `{saida_10x:.10f}`\n"
-                            f"🌕 **Alvo 3 (50x):** `{saida_50x:.10f}`\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"🔗 [Analisar na GMGN](https://gmgn.ai/sol/token/{addr})\n"
-                            f"⚠️ *Atenção: Risco alto. Verifique se o LP está Burned!*"
-                        )
-                        
-                        bot.send_message(CHAT_ID, msg, disable_web_page_preview=True)
-                        seen_tokens.add(addr)
+                # --- FILTRO ULTRA SENSÍVEL (Pega moedas bem no início) ---
+                # Liquidez > $8k (Mínimo absoluto para não ser travada)
+                # Market Cap > $10k
+                # Volume de 5min > $1k (Alguém está comprando agora)
+                if liq > 8000 and mcap > 10000 and vol_5m > 1000:
+                    
+                    price = float(pair['priceUsd'])
+                    
+                    # Cálculo de Alvos de Saída
+                    alvo_2x = price * 2
+                    alvo_10x = price * 10
+                    
+                    msg = (
+                        f"🔥 **ALERTA DE GEMA DETECTADA** 🔥\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"💎 **Token:** {pair['baseToken']['symbol']}\n"
+                        f"📊 **Mkt Cap:** `${mcap:,.0f}`\n"
+                        f"💧 **Liquidez:** `${liq:,.0f}`\n"
+                        f"🚀 **Vol (5m):** `${vol_5m:,.0f}`\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🟢 **ENTRADA:** `{price:.10f}`\n\n"
+                        f"💰 **ALVOS DE LUCRO:**\n"
+                        f"🎯 **Dobrar (2x):** `{alvo_2x:.10f}`\n"
+                        f"🚀 **Explodir (10x):** `{alvo_10x:.10f}`\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🔗 [Analisar na GMGN](https://gmgn.ai/sol/token/{addr})\n"
+                        f"⚠️ *Confira o selo 'Burned' na GMGN antes de entrar!*"
+                    )
+                    
+                    bot.send_message(CHAT_ID, msg, disable_web_page_preview=True)
+                    seen_tokens.add(addr)
             
-            if len(seen_tokens) > 500: seen_tokens.clear()
-        except:
-            pass
-        
-        time.sleep(45) # Varredura mais rápida (cada 45 seg)
+            if len(seen_tokens) > 1000: seen_tokens.clear()
+            
+        except Exception as e:
+            print(f"Erro no loop: {e}")
+            
+        time.sleep(30) # Varredura rápida (30 segundos)
 
 if __name__ == "__main__":
-    # Mantém a Koyeb ativa
+    # Servidor para Koyeb
     port = int(os.environ.get("PORT", 8080))
     t = Thread(target=lambda: app.run(host='0.0.0.0', port=port))
     t.daemon = True

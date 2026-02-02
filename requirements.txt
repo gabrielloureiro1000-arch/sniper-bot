@@ -3,3 +3,4 @@ requests
 flask
 solders
 solana
+base58

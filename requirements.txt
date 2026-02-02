@@ -2,3 +2,5 @@ pyTelegramBotAPI
 requests
 solders
 solana
+flask
+gunicorn

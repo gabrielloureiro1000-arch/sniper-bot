@@ -10,23 +10,23 @@ CHAT_ID = "5080696866"
 RPC_URL = "https://api.mainnet-beta.solana.com"
 PRIVATE_KEY_B58 = os.environ.get("SOLANA_PRIVATE_KEY")
 
-# Estratégia
 VALOR_COMPRA_SOL = 0.1
-TAKE_PROFIT = 1.5  # 50% de lucro
-STOP_LOSS = 0.8    # 20% de queda
+TAKE_PROFIT = 1.5
+STOP_LOSS = 0.8
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
 app = Flask(__name__)
 solana_client = Client(RPC_URL)
 
-# Banco de dados em memória
 posicoes = {}
 tokens_processados = set()
 lucro_total_hora = 0.0
 compras_total_hora = 0
 
 @app.route('/')
-def health(): return "SNIPER_SILENCIOSO_ONLINE", 200
+@app.route('/healthz')
+def health(): 
+    return "OK", 200
 
 def fazer_swap(input_mint, output_mint, amount):
     try:
@@ -45,14 +45,10 @@ def fazer_swap(input_mint, output_mint, amount):
 def relatorio_financeiro():
     global lucro_total_hora, compras_total_hora
     while True:
-        time.sleep(3600) # 1 hora
-        msg = (
-            f"📊 **RELATÓRIO DE LUCROS (ÚLTIMA HORA)**\n\n"
-            f"🛒 Compras Realizadas: {compras_total_hora}\n"
-            f"💰 Resultado Líquido: `{lucro_total_hora:.4f} SOL`"
-        )
-        bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-        # Reset para a próxima hora
+        time.sleep(3600)
+        msg = f"📊 **RELATÓRIO DE LUCROS**\n\n🛒 Compras: {compras_total_hora}\n💰 Lucro: `{lucro_total_hora:.4f} SOL`"
+        try: bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+        except: pass
         lucro_total_hora = 0.0
         compras_total_hora = 0
 
@@ -65,14 +61,13 @@ def monitor_vendas():
                 res = requests.get(f"https://api.jup.ag/price/v2?ids={mint}").json()
                 preco_atual = float(res['data'][mint]['price'])
                 rendimento = preco_atual / pos['entry_price']
-                
                 if rendimento >= TAKE_PROFIT or rendimento <= STOP_LOSS:
                     tx, _ = fazer_swap(mint, "So11111111111111111111111111111111111111112", pos['amount_tokens'])
                     if tx:
                         lucro = (VALOR_COMPRA_SOL * rendimento) - VALOR_COMPRA_SOL
                         lucro_total_hora += lucro
                         emoji = "✅" if lucro > 0 else "🛑"
-                        bot.send_message(CHAT_ID, f"{emoji} **VENDA EXECUTADA**\n\nToken: `{mint}`\nLucro: {rendimento:.2f}x\nTX: [Solscan](https://solscan.io/tx/{tx})")
+                        bot.send_message(CHAT_ID, f"{emoji} **VENDA**\nToken: `{mint}`\nLucro: {rendimento:.2f}x")
                         del posicoes[mint]
             except: continue
         time.sleep(20)
@@ -81,35 +76,29 @@ def sniper_scanner():
     global compras_total_hora
     while True:
         try:
-            # Puxa tokens novos
             data = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10).json()
             for item in data:
                 addr = item.get('tokenAddress')
-                
-                # FILTRO SOCIAL (Qualidade)
-                tem_social = any(l.get('type') in ['website', 'twitter'] for l in item.get('links', []))
-                
-                if item.get('chainId') == 'solana' and addr not in tokens_processados and tem_social:
+                has_social = any(l.get('type') in ['website', 'twitter'] for l in item.get('links', []))
+                if item.get('chainId') == 'solana' and addr not in tokens_processados and has_social:
                     tokens_processados.add(addr)
-                    
-                    # COMPRA EM SILÊNCIO (Não avisa nada aqui)
-                    lamports = int(VALOR_COMPRA_SOL * 1_000_000_000)
-                    tx, out_amount = fazer_swap("So11111111111111111111111111111111111111112", addr, lamports)
-                    
+                    tx, out_amount = fazer_swap("So11111111111111111111111111111111111111112", addr, int(VALOR_COMPRA_SOL * 1_000_000_000))
                     if tx:
-                        # APENAS SE A COMPRA DER CERTO, ELE AVISA
                         time.sleep(2)
                         res_p = requests.get(f"https://api.jup.ag/price/v2?ids={addr}").json()
-                        preco_e = float(res_p['data'][addr]['price'])
-                        posicoes[addr] = {'entry_price': preco_e, 'amount_tokens': out_amount}
+                        posicoes[addr] = {'entry_price': float(res_p['data'][addr]['price']), 'amount_tokens': out_amount}
                         compras_total_hora += 1
-                        bot.send_message(CHAT_ID, f"🛒 **NOVA COMPRA**\n\nToken: `{addr}`\nTX: [Solscan](https://solscan.io/tx/{tx})")
-            
-            time.sleep(40) # Delay maior para evitar spam
+                        bot.send_message(CHAT_ID, f"🛒 **COMPRA**\nToken: `{addr}`\n[Solscan](https://solscan.io/tx/{tx})")
+            time.sleep(45)
         except: time.sleep(20)
 
+# Lógica de Inicialização Segura
 if __name__ == "__main__":
+    # Inicia as engrenagens do bot em segundo plano
     threading.Thread(target=sniper_scanner, daemon=True).start()
     threading.Thread(target=monitor_vendas, daemon=True).start()
     threading.Thread(target=relatorio_financeiro, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+    
+    # Inicia o servidor Flask imediatamente (Isso evita o erro do Koyeb)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)

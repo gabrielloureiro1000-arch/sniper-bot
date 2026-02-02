@@ -15,91 +15,96 @@ CHAT_ID = "5080696866"
 RPC_URL = "https://api.mainnet-beta.solana.com"
 PRIVATE_KEY_B58 = os.environ.get("SOLANA_PRIVATE_KEY")
 
-# Metas de Venda
-TAKE_PROFIT = 2.0  # Vende quando dobrar (2x)
-STOP_LOSS = 0.7    # Vende se cair 30% (0.7 do valor original)
+# Estratégia
+VALOR_COMPRA_SOL = 0.1
+TAKE_PROFIT = 2.0  # 2x (100% lucro)
+STOP_LOSS = 0.7    # -30% prejuízo
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
 app = Flask(__name__)
 solana_client = Client(RPC_URL)
 
-# Dicionário para gerenciar o que foi comprado: { 'token_address': { 'entry_price': 0.0, 'amount': 0 } }
-posicoes_abertas = {}
+# Dicionário de posições: { 'mint': {'entry_price': 0.0, 'amount_tokens': 0} }
+posicoes = {}
+tokens_processados = set()
 
 @app.route('/')
-def health(): return "AUTO_TRADER_V2_ACTIVE", 200
+@app.route('/healthz')
+def health(): return "AUTO_TRADER_V3_RUNNING", 200
 
 def obter_preco(mint):
     try:
-        url = f"https://api.jup.ag/price/v2?ids={mint}"
-        res = requests.get(url).json()
+        res = requests.get(f"https://api.jup.ag/price/v2?ids={mint}", timeout=5).json()
         return float(res['data'][mint]['price'])
     except: return None
 
-def executar_swap(input_mint, output_mint, amount_lamports):
-    """Função genérica para Swap (Compra ou Venda)"""
+def fazer_swap(input_mint, output_mint, amount, is_buy=True):
     try:
         payer = Keypair.from_base58_string(PRIVATE_KEY_B58)
-        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={int(amount_lamports)}&slippageBps=1500"
-        quote = requests.get(quote_url).json()
+        # 1. Quote
+        quote = requests.get(f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={int(amount)}&slippageBps=1500").json()
         
-        swap_data = {"quoteResponse": quote, "userPublicKey": str(payer.pubkey()), "wrapAndUnwrapSol": True}
-        tx_res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_data).json()
+        # 2. Swap Transaction
+        swap_res = requests.post("https://quote-api.jup.ag/v6/swap", json={
+            "quoteResponse": quote,
+            "userPublicKey": str(payer.pubkey()),
+            "wrapAndUnwrapSol": True
+        }).json()
         
-        raw_tx = VersionedTransaction.from_bytes(base58.b58decode(tx_res['swapTransaction']))
+        # 3. Sign & Send
+        raw_tx = VersionedTransaction.from_bytes(base58.b58decode(swap_res['swapTransaction']))
         signature = payer.sign_message(raw_tx.message)
         signed_tx = VersionedTransaction.populate(raw_tx.message, [signature])
         
-        result = solana_client.send_raw_transaction(bytes(signed_tx))
-        return str(result.value)
+        tx_id = solana_client.send_raw_transaction(bytes(signed_tx))
+        return str(tx_id.value), quote.get('outAmount')
     except Exception as e:
-        print(f"Erro no Swap: {e}")
-        return None
+        print(f"Erro Swap: {e}")
+        return None, None
 
-def monitor_de_vendas():
-    """Loop que vigia as moedas compradas para vender no lucro/prejuízo"""
-    print("📈 Monitor de Vendas iniciado...")
+def monitor_vendas():
     while True:
-        for mint, info in list(posicoes_abertas.items()):
+        for mint in list(posicoes.keys()):
+            pos = posicoes[mint]
             preco_atual = obter_preco(mint)
             if not preco_atual: continue
             
-            lucro = preco_atual / info['entry_price']
+            rendimento = preco_atual / pos['entry_price']
             
-            if lucro >= TAKE_PROFIT or lucro <= STOP_LOSS:
-                print(f"🚀 Alvo atingido para {mint}. Vendendo...")
-                # Lógica simplificada: Venda exige saber o saldo exato (tokens). 
-                # Para simplificar este código, o bot avisa e tenta vender o que comprou.
-                tx = executar_swap(mint, "So11111111111111111111111111111111111111112", info['amount_tokens'])
+            if rendimento >= TAKE_PROFIT or rendimento <= STOP_LOSS:
+                print(f"🚨 Alvo atingido para {mint}. Vendendo...")
+                tx, _ = fazer_swap(mint, "So11111111111111111111111111111111111111112", pos['amount_tokens'], is_buy=False)
                 
-                status = "LUCRO 🚀" if lucro >= TAKE_PROFIT else "STOP LOSS 🛑"
                 if tx:
-                    bot.send_message(CHAT_ID, f"✅ **VENDA EXECUTADA ({status})**\nToken: `{mint}`\nRetorno: {lucro:.2f}x")
-                    del posicoes_abertas[mint]
-        time.sleep(10)
+                    status = "LUCRO 💰" if rendimento >= TAKE_PROFIT else "STOP 🛑"
+                    bot.send_message(CHAT_ID, f"{status} **VENDA EXECUTADA**\n\nToken: `{mint}`\nResultado: {rendimento:.2f}x\nTX: [Link](https://solscan.io/tx/{tx})")
+                    del posicoes[mint]
+        time.sleep(15)
 
-def sniper_loop():
-    print("🚀 Sniper e Comprador iniciado...")
+def sniper_scanner():
+    print("🚀 Sniper Ativo: Escaneando e Comprando...")
     while True:
         try:
-            url = "https://api.dexscreener.com/token-profiles/latest/v1"
-            tokens = requests.get(url).json()
-            for t in tokens:
-                addr = t.get('tokenAddress')
-                if t.get('chainId') == 'solana' and addr not in posicoes_abertas:
-                    # COMPRA
-                    print(f"🎯 Comprando novo token: {addr}")
-                    tx = executar_swap("So11111111111111111111111111111111111111112", addr, 100_000_000) # 0.1 SOL
+            data = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10).json()
+            for item in data:
+                addr = item.get('tokenAddress')
+                if item.get('chainId') == 'solana' and addr not in tokens_processados:
+                    tokens_processados.add(addr)
+                    
+                    # Tenta Compra
+                    lamports = int(VALOR_COMPRA_SOL * 1_000_000_000)
+                    tx, out_amount = fazer_swap("So11111111111111111111111111111111111111112", addr, lamports)
                     
                     if tx:
-                        preco = obter_preco(addr)
-                        if preco:
-                            posicoes_abertas[addr] = {'entry_price': preco, 'amount_tokens': 1000000} # Exemplo simplificado de amount
-                            bot.send_message(CHAT_ID, f"🛒 **COMPRA AUTOMÁTICA**\nToken: `{addr}`\nTX: {tx}")
+                        preco_entrada = obter_preco(addr)
+                        if preco_entrada and out_amount:
+                            posicoes[addr] = {'entry_price': preco_entrada, 'amount_tokens': out_amount}
+                            bot.send_message(CHAT_ID, f"🛒 **COMPRA EXECUTADA**\n\nToken: `{addr}`\nPreço: ${preco_entrada}\nTX: [Solscan](https://solscan.io/tx/{tx})")
+            
             time.sleep(20)
         except: time.sleep(10)
 
 if __name__ == "__main__":
-    threading.Thread(target=sniper_loop, daemon=True).start()
-    threading.Thread(target=monitor_de_vendas, daemon=True).start()
+    threading.Thread(target=sniper_scanner, daemon=True).start()
+    threading.Thread(target=monitor_vendas, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))

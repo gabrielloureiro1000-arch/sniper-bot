@@ -1,54 +1,52 @@
+import os
 import time
-import requests
-import telebot
 import threading
+import telebot
 from flask import Flask
-from solana.rpc.api import Client
-from solders.keypair import Keypair
 
 # --- CONFIGURAÇÕES ---
-TOKEN_TELEGRAM = "SEU_TOKEN"
-CHAT_ID = "SEU_CHAT_ID"
-PRIVATE_KEY = "SUA_CHAVE_PRIVADA"
-RPC_URL = "https://api.mainnet-beta.solana.com"
+TOKEN_TELEGRAM = os.environ.get("TOKEN_TELEGRAM", "SEU_TOKEN_AQUI")
+CHAT_ID = os.environ.get("CHAT_ID", "SEU_CHAT_ID_AQUI")
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
 app = Flask(__name__)
 
-# --- SAÚDE DO SERVIDOR (Para o Koyeb não derrubar) ---
+# 1. Rota de Health Check (Essencial para o Koyeb)
+@app.route('/healthz')
 @app.route('/')
-def health_check():
-    return "Bot is Running", 200
+def health():
+    return "OK", 200
 
-# --- LÓGICA DO BOT (Em Segundo Plano) ---
-def hunter_loop():
-    tokens_processados = set()
-    print("Iniciando loop do Hunter...")
+# 2. Motor do Bot
+def bot_worker():
+    print("🚀 Motor do Hunter iniciado...")
+    # Evita que o bot tente enviar mensagens antes da rede estar estável
+    time.sleep(10) 
+    
+    tokens_comprados = set()
     
     while True:
         try:
-            # Substitua pelo seu scanner real do GMGN
-            contrato = "0x873301F2B4B83FeaFF04121B68eC9231B29Ce0df" 
+            # Lógica de detecção (exemplo)
+            contrato_alvo = "0x873301F2B4B83FeaFF04121B68eC9231B29Ce0df"
             
-            if contrato not in tokens_processados:
-                print(f"Alvo detectado: {contrato}")
-                # Aqui entra sua função de swap_jup que passamos antes
-                # bot.send_message(CHAT_ID, f"Compra tentada: {contrato}")
-                tokens_processados.add(contrato)
+            if contrato_alvo not in tokens_comprados:
+                # print(f"Executando buy para {contrato_alvo}")
+                # bot.send_message(CHAT_ID, f"🎯 Alvo Detectado: {contrato_alvo}")
+                tokens_comprados.add(contrato_alvo)
             
-            time.sleep(20) # Delay para evitar Connection Reset
+            time.sleep(30) # Delay seguro para não ser banido por spam
         except Exception as e:
-            print(f"Erro no loop: {e}")
+            print(f"Erro no Worker: {e}")
             time.sleep(10)
 
-# --- INICIALIZAÇÃO MULTI-TAREFA ---
+# 3. Inicialização
 if __name__ == "__main__":
-    # 1. Inicia o Bot em uma Thread separada
-    t = threading.Thread(target=hunter_loop)
-    t.daemon = True
-    t.start()
-
-    # 2. Inicia o Flask na porta que o Koyeb exige
-    import os
+    # Inicia o bot em uma thread separada (background)
+    worker_thread = threading.Thread(target=bot_worker, daemon=True)
+    worker_thread.start()
+    
+    # Inicia o servidor Web (foreground)
+    # O Koyeb injeta automaticamente a variável PORT
     port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)

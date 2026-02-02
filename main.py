@@ -1,131 +1,75 @@
-import os
-import time
 import telebot
-import requests
-from flask import Flask
-from threading import Thread
+import time
+import sys
+from telebot import apihelper
+from requests.exceptions import ConnectionError, ReadTimeout
 
 # --- CONFIGURAÇÕES ---
-TOKEN = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
-CHAT_ID = "5080696866"
-PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY") 
-VALOR_COMPRA_SOL = 0.1 
+TOKEN = "SEU_TOKEN_AQUI"
+CHAT_ID = "SEU_CHAT_ID_AQUI"
+SOL_AMOUNT = 0.1
 
 bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
+apihelper.RETRY_ON_HTTP_ERROR = True
 
-# Memória de Operações
-seen_tokens = set()
-trades_do_dia = []
-total_lucro_usd = 0
+# Conjunto para evitar compras duplicadas do mesmo contrato no mesmo ciclo
+comprados = set()
 
-@app.route('/')
-def health_check():
-    return "Auto-Trader Real Online", 200
+def safe_send_message(text):
+    """Envia mensagem com tratamento de erro para não derrubar o bot"""
+    try:
+        bot.send_message(CHAT_ID, text, parse_mode='Markdown')
+    except Exception as e:
+        print(f"Erro ao enviar Telegram: {e}")
 
-def enviar_relatorio_final():
-    global total_lucro_usd, trades_do_dia
-    if not trades_do_dia:
-        bot.send_message(CHAT_ID, "📊 **RELATÓRIO SEM OPERAÇÕES**")
+def executar_buy(contrato):
+    """Lógica de compra com trava de duplicidade"""
+    if contrato in comprados:
         return
     
-    msg = "📋 **RELATÓRIO DIÁRIO DE TRADES**\n━━━━━━━━━━━━━━━━━━\n"
-    for t in trades_do_dia:
-        msg += f"🔹 {t['token']} ({t['status']}): {t['percentual']:.2f}% | USD: ${t['lucro_valor']:.2f}\n"
-    
-    msg += f"━━━━━━━━━━━━━━━━━━\n💰 **TOTAL DO DIA: ${total_lucro_usd:.2f}**"
-    bot.send_message(CHAT_ID, msg)
-    trades_do_dia = []
-    total_lucro_usd = 0
+    try:
+        print(f"Executando buy para {contrato}")
+        # INSIRA AQUI SUA LÓGICA DE INTEGRAÇÃO COM A API GMGN / SOLANA
+        # Exemplo fictício: gmg_api.swap(token_in="SOL", token_out=contrato, amount=SOL_AMOUNT)
+        
+        safe_send_message(f"✅ **COMPRA EXECUTADA**\nContrato: `{contrato}`\nValor: {SOL_AMOUNT} SOL")
+        comprados.add(contrato)
+    except Exception as e:
+        print(f"Falha na transação: {e}")
+        safe_send_message(f"⚠️ **ERRO NA COMPRA**: {contrato}")
 
 def hunter_loop():
-    global total_lucro_usd
-    bot.send_message(CHAT_ID, "🤖 **AUTO-TRADER REAL ATIVADO**\nConectado à carteira. Monitorando Solana...")
+    """Loop principal com proteção contra queda de conexão"""
+    safe_send_message("🤖 **AUTO-TRADER GMGN ATIVADO**\nMonitorando oportunidades...")
     
     while True:
         try:
-            # Envio do relatório às 23:50 para fechar o dia
-            if time.strftime("%H:%M") == "23:50":
-                enviar_relatorio_final()
-                time.sleep(65)
+            # 1. Simulação de busca de tokens (Substitua pela sua lógica de scan)
+            # contrato_detectado = gmg_api.get_new_high_potential_tokens()
+            contrato_detectado = "0x873301F2B4B83FeaFF04121B68eC9231B29Ce0df" # Exemplo do seu log
 
-            url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-            response = requests.get(url, timeout=20).json()
-            pairs = response.get('pairs', [])
+            # 2. Executa a compra
+            executar_buy(contrato_detectado)
 
-            for pair in pairs:
-                symbol = pair['baseToken']['symbol']
-                addr = pair['baseToken']['address']
-                
-                # Bloqueio de moedas principais e repetições
-                if symbol in ['SOL', 'USDC', 'USDT', 'WSOL'] or addr in seen_tokens:
-                    continue
+            # 3. Delay crucial para evitar Rate Limit e Connection Reset
+            time.sleep(10) 
 
-                liq = pair.get('liquidity', {}).get('usd', 0)
-                mcap = pair.get('fdv', 0)
-                vol_5m = pair.get('volume', {}).get('m5', 0)
-                
-                # FILTRO DE ENTRADA (Gemas Explosivas)
-                if 12000 < liq < 300000 and 20000 < mcap < 600000 and vol_5m > 2000:
-                    
-                    entrada_usd = float(pair['priceUsd'])
-                    
-                    # --- MENSAGEM DE COMPRA DETALHADA ---
-                    msg_compra = (
-                        f"🛒 **COMPRA EXECUTADA**\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"💎 **Token:** {symbol}\n"
-                        f"📝 **Contrato:** `{addr}`\n"
-                        f"💰 **Investido:** {VALOR_COMPRA_SOL} SOL\n"
-                        f"📈 **Entrada:** `${entrada_usd:.10f}`\n"
-                        f"📊 **Mkt Cap:** `${mcap:,.0f}`\n"
-                        f"━━━━━━━━━━━━━━━━━━"
-                    )
-                    bot.send_message(CHAT_ID, msg_compra, parse_mode="Markdown")
-                    seen_tokens.add(addr)
-                    
-                    # --- MONITORAMENTO DE SAÍDA ---
-                    # Checa o preço por até 15 minutos ou até bater o alvo
-                    for i in range(30): 
-                        time.sleep(30)
-                        try:
-                            check = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}").json()
-                            preco_atual = float(check['pairs'][0]['priceUsd'])
-                            lucro_p = ((preco_atual - entrada_usd) / entrada_usd) * 100
-                            
-                            # ALVO: 100% (2x) ou STOP: -35%
-                            if lucro_p >= 100 or lucro_p <= -35:
-                                status_txt = "✅ LUCRO (TAKE PROFIT)" if lucro_p >= 100 else "🛑 PREJUÍZO (STOP LOSS)"
-                                lucro_usd_estimado = (VALOR_COMPRA_SOL * 165) * (lucro_p / 100) # Câmbio aprox SOL/USD
-                                
-                                msg_venda = (
-                                    f"{status_txt}\n"
-                                    f"━━━━━━━━━━━━━━━━━━\n"
-                                    f"💎 **Token:** {symbol}\n"
-                                    f"📉 **Saída:** `${preco_atual:.10f}`\n"
-                                    f"📊 **Resultado:** `{lucro_p:.2f}%`\n"
-                                    f"💵 **Lucro Est.:** `${lucro_usd_estimado:.2f}`\n"
-                                    f"━━━━━━━━━━━━━━━━━━"
-                                )
-                                bot.send_message(CHAT_ID, msg_venda, parse_mode="Markdown")
-                                
-                                trades_do_dia.append({
-                                    'token': symbol,
-                                    'percentual': lucro_p,
-                                    'lucro_valor': lucro_usd_estimado,
-                                    'status': "WIN" if lucro_p >= 100 else "LOSS"
-                                })
-                                total_lucro_usd += lucro_usd_estimado
-                                break
-                        except:
-                            continue
-            
+        except (ConnectionError, ReadTimeout) as e:
+            print(f"Erro de conexão detectado: {e}. Reiniciando loop em 5s...")
+            time.sleep(5)
+            continue
         except Exception as e:
-            print(f"Erro: {e}")
-        time.sleep(35)
+            print(f"Erro inesperado: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
-    t = Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080))))
-    t.daemon = True
-    t.start()
-    hunter_loop()
+    # Inicia o hunter dentro de um bloco que impede o crash final
+    while True:
+        try:
+            hunter_loop()
+        except KeyboardInterrupt:
+            print("Bot parado manualmente.")
+            sys.exit()
+        except Exception as e:
+            print(f"Crash crítico no sistema: {e}. Reiniciando aplicação completa...")
+            time.sleep(5)

@@ -1,6 +1,6 @@
+flask
 pyTelegramBotAPI
 requests
-flask
-solders
 solana
+solders
 base58

@@ -4,27 +4,35 @@ from flask import Flask
 from threading import Thread
 import telebot
 
-# Configurações básicas
 app = Flask('')
-TOKEN = os.getenv('TELEGRAM_TOKEN', '').strip()
-bot = telebot.TeleBot(TOKEN) if TOKEN else None
+
+# Pega o token e remove qualquer sujeira (espaços, aspas extras)
+RAW_TOKEN = os.getenv('TELEGRAM_TOKEN', '').replace('"', '').replace("'", "").strip()
+
+bot = None
+if ":" in RAW_TOKEN:
+    try:
+        bot = telebot.TeleBot(RAW_TOKEN)
+        print("✅ Token validado com sucesso!")
+    except Exception as e:
+        print(f"❌ Erro ao iniciar bot: {e}")
+else:
+    print("⚠️ AVISO: Variável TELEGRAM_TOKEN está vazia ou sem o formato correto (falta o ':')")
 
 @app.route('/')
-def health_check():
-    return "BOT_ALIVE", 200
+def health():
+    return "SERVER_ALIVE", 200
 
 def run_web():
-    # O Koyeb exige que o app responda na porta 8080
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # 1. Inicia o servidor web IMEDIATAMENTE
+    # Inicia servidor web primeiro para o Koyeb dar OK no Health Check
     Thread(target=run_web, daemon=True).start()
     
-    # 2. Inicia o Bot apenas se o Token existir
     if bot:
-        print("🚀 Sniper GMGN Iniciando...")
+        print("🚀 Polling iniciado...")
         while True:
             try:
                 bot.remove_webhook()
@@ -33,5 +41,6 @@ if __name__ == "__main__":
                 print(f"Erro no Polling: {e}")
                 time.sleep(10)
     else:
-        print("❌ ERRO: TELEGRAM_TOKEN não encontrado!")
-        while True: time.sleep(60)
+        print("🛑 Bot parado: Aguardando Token válido nas variáveis de ambiente.")
+        while True:
+            time.sleep(60)

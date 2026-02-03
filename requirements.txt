@@ -1,4 +1,5 @@
 pyTelegramBotAPI
 flask
 requests
-urllib3
+solana
+solders

@@ -8,90 +8,92 @@ from telebot import TeleBot
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# --- CONFIGURAÇÃO DO SERVIDOR WEB (Para o Koyeb) ---
+# --- 1. CONFIGURAÇÃO DO SERVIDOR WEB (Essencial para o Koyeb) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot Solana operando normalmente!"
+    return "Bot Solana: Status Online"
 
 def run_flask():
-    # O Koyeb exige que o app rode na porta 8080
+    # Porta 8080 é o padrão do Koyeb
     app.run(host='0.0.0.0', port=8080)
 
-# --- CONFIGURAÇÃO DO BOT ---
+# --- 2. CARREGAMENTO SEGURO DO TOKEN ---
+# Isso evita o erro 'NoneType' que aparece nos seus logs
 TOKEN = os.getenv('TELEGRAM_TOKEN')
-bot = None
 
-if TOKEN:
+def get_bot():
+    if not TOKEN:
+        print("❌ ERRO: A variável 'TELEGRAM_TOKEN' está vazia ou não configurada.")
+        return None
     try:
-        bot = TeleBot(TOKEN)
-        print("✅ Token do Telegram carregado com sucesso.")
+        instance = TeleBot(TOKEN)
+        # Teste simples de validação
+        print(f"✅ Token detectado: {TOKEN[:6]}***")
+        return instance
     except Exception as e:
-        print(f"❌ Erro ao iniciar bot: {e}")
-else:
-    print("❌ Erro: Variável TELEGRAM_TOKEN não encontrada.")
+        print(f"❌ Erro ao validar token: {e}")
+        return None
 
-# --- FUNÇÃO DE BUSCA NA JUPITER (Resiliente) ---
+bot = get_bot()
+
+# --- 3. LÓGICA DE COTAÇÃO JUPITER (Com correção de DNS) ---
 def get_jupiter_quote(mint_address):
-    # Endereço da SOL (Input)
-    sol_mint = "So11111111111111111111111111111111111111112"
     url = "https://quote-api.jup.ag/v6/quote"
+    sol_mint = "So11111111111111111111111111111111111111112"
     
     params = {
         "inputMint": sol_mint,
         "outputMint": mint_address,
-        "amount": "100000000", # 0.1 SOL em lamports
-        "slippageBps": 50 # 0.5% de slippage
+        "amount": "100000000",  # 0.1 SOL
+        "slippageBps": 100
     }
 
+    # Sessão com tentativas automáticas para vencer o NameResolutionError
     session = requests.Session()
-    # Tenta 5 vezes antes de desistir do DNS/Conexão
     retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
 
     try:
+        # Timeout curto para não travar o bot em loops infinitos
         response = session.get(url, params=params, timeout=10)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Erro na Jupiter para o token {mint_address}: {e}")
+        print(f"⚠️ Erro de conexão Jupiter: {e}")
         return None
 
-# --- COMANDOS DO BOT ---
+# --- 4. COMANDOS DO TELEGRAM ---
 if bot:
-    @bot.message_handler(commands=['start', 'help'])
-    def send_welcome(message):
-        bot.reply_to(message, "🤖 Bot Solana Ativo!\nEnvie o endereço de um token para ver o preço.")
+    @bot.message_handler(commands=['start'])
+    def start(message):
+        bot.reply_to(message, "🤖 Bot Online! Envie o contrato do token Solana para cotação.")
 
     @bot.message_handler(func=lambda m: True)
-    def handle_address(message):
-        token_address = message.text.strip()
-        
-        # Verifica se parece um endereço Solana (comprimento comum)
-        if len(token_address) >= 32 and len(token_address) <= 44:
-            bot.send_message(message.chat.id, "🔍 Consultando Jupiter API...")
-            data = get_jupiter_quote(token_address)
-            
+    def handle_msg(message):
+        text = message.text.strip()
+        if len(text) > 30: # Filtro básico para endereços Solana
+            bot.reply_to(message, "🔍 Consultando Jupiter API...")
+            data = get_jupiter_quote(text)
             if data:
-                out_amount = int(data.get('outAmount', 0)) / 10**6 # Exemplo para tokens com 6 decimais
-                bot.reply_to(message, f"📈 Cotação para 0.1 SOL:\nReceberá aprox: {out_amount:.2f} do token.")
+                price = data.get('outAmount')
+                bot.send_message(message.chat.id, f"✅ Cotação encontrada!\nRetorno: {price} unidades.")
             else:
-                bot.reply_to(message, "❌ Não consegui obter a cotação. A API pode estar instável.")
-        else:
-            bot.reply_to(message, "Endereço inválido. Envie um contrato Solana válido.")
+                bot.send_message(message.chat.id, "❌ Falha no DNS/API. Tente novamente em 10 segundos.")
 
-# --- INICIALIZAÇÃO ---
+# --- 5. EXECUÇÃO ---
 if __name__ == "__main__":
-    # Inicia o Flask em segundo plano
-    Thread(target=run_flask).start()
+    # Inicia servidor Web para o Health Check
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
     
-    # Inicia o Polling do Telegram
     if bot:
-        print("Iniciando escuta do Telegram...")
+        print("🚀 Bot iniciando polling...")
+        bot.polling(none_stop=True)
+    else:
+        print("🛑 Bot parado: Corrija o TOKEN nas variáveis de ambiente do Koyeb.")
+        # Mantém o processo vivo para o Flask responder e você ler os logs
         while True:
-            try:
-                bot.polling(none_stop=True, interval=0, timeout=20)
-            except Exception as e:
-                print(f"Erro no polling: {e}")
-                time.sleep(5)
+            time.sleep(60)

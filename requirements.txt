@@ -1,6 +1,4 @@
-flask
 pyTelegramBotAPI
 requests
-solana
-solders
-base58
+flask
+urllib3

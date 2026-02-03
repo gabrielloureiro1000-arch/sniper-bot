@@ -1,78 +1,100 @@
-import os, time, threading, requests, telebot, base58
+import os
+import time
+import socket
+import requests
 from flask import Flask
-from solana.rpc.api import Client
-from solders.keypair import Keypair
-from solders.transaction import VersionedTransaction
+from threading import Thread
+from telebot import TeleBot
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# === CONFIGURAÇÕES ===
-TOKEN_TELEGRAM = "8595782081:AAGX0zuwjeZtccuMBWXNIzW-VmLuPMmH1VI"
-CHAT_ID = "5080696866"
-RPC_URL = "https://api.mainnet-beta.solana.com"
-# Busca a chave, se não achar, usa uma string vazia para não travar o código
-PRIVATE_KEY_B58 = os.environ.get("SOLANA_PRIVATE_KEY", "")
+# --- CONFIGURAÇÃO DO FLASK (Para o Koyeb manter vivo) ---
+app = Flask('')
 
-bot = telebot.TeleBot(TOKEN_TELEGRAM)
-app = Flask(__name__)
-solana_client = Client(RPC_URL)
-
-# --- SERVIDOR PARA O KOYEB NÃO DAR ERRO ---
 @app.route('/')
-@app.route('/healthz')
-def health():
-    return "ALIVE", 200
+def home():
+    return "Bot Online e Saudável!"
 
-# --- FUNÇÃO DE COMPRA/VENDA ---
-def fazer_swap(input_mint, output_mint, amount):
-    if not PRIVATE_KEY_B58:
-        print("ERRO: Variável SOLANA_PRIVATE_KEY não configurada no Koyeb!")
-        return None, None
-    try:
-        payer = Keypair.from_base58_string(PRIVATE_KEY_B58)
-        # Request Quote
-        quote = requests.get(f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={int(amount)}&slippageBps=1500", timeout=10).json()
-        # Request Swap Transaction
-        swap_res = requests.post("https://quote-api.jup.ag/v6/swap", json={
-            "quoteResponse": quote, "userPublicKey": str(payer.pubkey()), "wrapAndUnwrapSol": True
-        }, timeout=10).json()
-        
-        raw_tx = VersionedTransaction.from_bytes(base58.b58decode(swap_res['swapTransaction']))
-        signature = payer.sign_message(raw_tx.message)
-        signed_tx = VersionedTransaction.populate(raw_tx.message, [signature])
-        tx_id = solana_client.send_raw_transaction(bytes(signed_tx))
-        return str(tx_id.value), quote.get('outAmount')
-    except Exception as e:
-        print(f"Erro no Swap: {e}")
-        return None, None
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
 
-# --- SCANNER DE TOKENS ---
-def sniper_scanner():
-    processados = set()
-    bot.send_message(CHAT_ID, "🚀 **Sniper Silencioso Iniciado!**\nMonitorando novos tokens...")
-    
-    while True:
+# --- CONFIGURAÇÕES DE AMBIENTE ---
+TOKEN = os.getenv('TELEGRAM_TOKEN') # Sua variável no Koyeb
+bot = TeleBot(TOKEN)
+
+# --- FUNÇÃO DE DIAGNÓSTICO DE REDE ---
+def diagnostic():
+    print("\n--- INICIANDO DIAGNÓSTICO DE REDE ---")
+    hosts = ['google.com', 'quote-api.jup.ag', 'api.mainnet-beta.solana.com']
+    for host in hosts:
         try:
-            # Puxa os lançamentos mais recentes do DexScreener
-            data = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10).json()
-            for item in data:
-                addr = item.get('tokenAddress')
-                if item.get('chainId') == 'solana' and addr not in processados:
-                    processados.add(addr)
-                    
-                    # Tenta comprar 0.1 SOL
-                    tx, _ = fazer_swap("So11111111111111111111111111111111111111112", addr, 100_000_000)
-                    
-                    if tx:
-                        bot.send_message(CHAT_ID, f"🛒 **COMPRA EXECUTADA!**\nToken: `{addr}`\n[Ver no Solscan](https://solscan.io/tx/{tx})")
-            time.sleep(30)
-        except:
-            time.sleep(10)
+            ip = socket.gethostbyname(host)
+            print(f"✅ DNS OK: {host} -> {ip}")
+        except Exception as e:
+            print(f"❌ ERRO DNS: {host} não pôde ser resolvido: {e}")
+    print("------------------------------------\n")
 
+# --- SISTEMA DE REQUISIÇÃO COM RETRY (CORREÇÃO DO ERRO 104) ---
+def safe_get_quote(input_mint, output_mint, amount, slippage=1500):
+    url = "https://quote-api.jup.ag/v6/quote"
+    params = {
+        "inputMint": input_mint,
+        "outputMint": output_mint,
+        "amount": amount,
+        "slippageBps": slippage
+    }
+    
+    session = requests.Session()
+    # Tenta 5 vezes com espera progressiva (backoff)
+    retries = Retry(
+        total=5,
+        backoff_factor=2, 
+        status_forcelist=[500, 502, 503, 504],
+        raise_on_status=False
+    )
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+
+    try:
+        response = session.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"Erro no Swap/Jupiter: {e}")
+        return None
+
+# --- COMANDOS DO TELEGRAM ---
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    bot.reply_to(message, "Robô de Swap Solana Ativo! Aguardando sinais...")
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    # Exemplo simples: se receber um endereço, tenta buscar cotação
+    if len(message.text) > 30: # Provável endereço de token
+        bot.send_message(message.chat.id, "Buscando cotação na Jupiter...")
+        # Mint da SOL (fixo) e Mint do Token (da mensagem)
+        sol_mint = "So11111111111111111111111111111111111111112"
+        quote = safe_get_quote(sol_mint, message.text, 100000000) # 0.1 SOL
+        
+        if quote:
+            out_amount = quote.get('outAmount', '0')
+            bot.send_message(message.chat.id, f"Cotação recebida! Valor estimado: {out_amount}")
+        else:
+            bot.send_message(message.chat.id, "Erro de conexão com a API da Jupiter. Tentando novamente em instantes...")
+
+# --- INICIALIZAÇÃO ---
 if __name__ == "__main__":
-    # Inicia o Scanner em uma thread separada
-    t = threading.Thread(target=sniper_scanner)
-    t.daemon = True
+    diagnostic() # Roda o teste de rede antes de tudo
+    
+    # Inicia o Flask em uma thread separada
+    t = Thread(target=run_flask)
     t.start()
     
-    # Inicia o Flask na porta correta
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    # Inicia o bot do Telegram
+    print("Bot iniciando polling...")
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except Exception as e:
+            print(f"Erro no Polling (Telegram): {e}")
+            time.sleep(5)

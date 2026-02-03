@@ -8,33 +8,32 @@ from telebot import TeleBot
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# --- CONFIGURAÇÃO DO FLASK (Para o Koyeb manter vivo) ---
+# --- CONFIGURAÇÃO DO FLASK ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot Online e Saudável!"
+    return "Bot Online!"
 
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
-# --- CONFIGURAÇÕES DE AMBIENTE ---
-TOKEN = os.getenv('TELEGRAM_TOKEN') # Sua variável no Koyeb
-bot = TeleBot(TOKEN)
+# --- INICIALIZAÇÃO SEGURA DO BOT ---
+TOKEN = os.getenv('TELEGRAM_TOKEN')
 
-# --- FUNÇÃO DE DIAGNÓSTICO DE REDE ---
-def diagnostic():
-    print("\n--- INICIANDO DIAGNÓSTICO DE REDE ---")
-    hosts = ['google.com', 'quote-api.jup.ag', 'api.mainnet-beta.solana.com']
-    for host in hosts:
-        try:
-            ip = socket.gethostbyname(host)
-            print(f"✅ DNS OK: {host} -> {ip}")
-        except Exception as e:
-            print(f"❌ ERRO DNS: {host} não pôde ser resolvido: {e}")
-    print("------------------------------------\n")
+if not TOKEN:
+    print("\n❌ ERRO CRÍTICO: Variável 'TELEGRAM_TOKEN' não encontrada!")
+    print("Verifique o painel do Koyeb > Environment Variables.\n")
+    bot = None
+else:
+    try:
+        bot = TeleBot(TOKEN)
+        print("✅ Token do Telegram carregado com sucesso.")
+    except Exception as e:
+        print(f"❌ Erro ao validar Token: {e}")
+        bot = None
 
-# --- SISTEMA DE REQUISIÇÃO COM RETRY (CORREÇÃO DO ERRO 104) ---
+# --- REQUISIÇÃO JUPITER COM RETRIES ---
 def safe_get_quote(input_mint, output_mint, amount, slippage=1500):
     url = "https://quote-api.jup.ag/v6/quote"
     params = {
@@ -43,58 +42,39 @@ def safe_get_quote(input_mint, output_mint, amount, slippage=1500):
         "amount": amount,
         "slippageBps": slippage
     }
-    
     session = requests.Session()
-    # Tenta 5 vezes com espera progressiva (backoff)
-    retries = Retry(
-        total=5,
-        backoff_factor=2, 
-        status_forcelist=[500, 502, 503, 504],
-        raise_on_status=False
-    )
+    retries = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
 
     try:
         response = session.get(url, params=params, timeout=15)
-        response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Erro no Swap/Jupiter: {e}")
+        print(f"Erro na Jupiter: {e}")
         return None
 
-# --- COMANDOS DO TELEGRAM ---
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "Robô de Swap Solana Ativo! Aguardando sinais...")
+# --- COMANDOS ---
+if bot:
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message):
+        bot.reply_to(message, "Bot Ativo!")
 
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    # Exemplo simples: se receber um endereço, tenta buscar cotação
-    if len(message.text) > 30: # Provável endereço de token
-        bot.send_message(message.chat.id, "Buscando cotação na Jupiter...")
-        # Mint da SOL (fixo) e Mint do Token (da mensagem)
-        sol_mint = "So11111111111111111111111111111111111111112"
-        quote = safe_get_quote(sol_mint, message.text, 100000000) # 0.1 SOL
-        
-        if quote:
-            out_amount = quote.get('outAmount', '0')
-            bot.send_message(message.chat.id, f"Cotação recebida! Valor estimado: {out_amount}")
-        else:
-            bot.send_message(message.chat.id, "Erro de conexão com a API da Jupiter. Tentando novamente em instantes...")
+    @bot.message_handler(func=lambda m: True)
+    def handle_message(message):
+        if len(message.text) > 30:
+            sol_mint = "So11111111111111111111111111111111111111112"
+            quote = safe_get_quote(sol_mint, message.text, 100000000)
+            if quote:
+                bot.send_message(message.chat.id, f"Cotação: {quote.get('outAmount')}")
 
-# --- INICIALIZAÇÃO ---
+# --- EXECUÇÃO ---
 if __name__ == "__main__":
-    diagnostic() # Roda o teste de rede antes de tudo
+    # Inicia Flask
+    Thread(target=run_flask).start()
     
-    # Inicia o Flask em uma thread separada
-    t = Thread(target=run_flask)
-    t.start()
-    
-    # Inicia o bot do Telegram
-    print("Bot iniciando polling...")
-    while True:
-        try:
-            bot.polling(none_stop=True, interval=0, timeout=20)
-        except Exception as e:
-            print(f"Erro no Polling (Telegram): {e}")
-            time.sleep(5)
+    if bot:
+        print("Iniciando polling do Telegram...")
+        bot.polling(none_stop=True)
+    else:
+        print("Bot não iniciado devido a erro no Token. O Flask continuará rodando.")
+        while True: time.sleep(10)

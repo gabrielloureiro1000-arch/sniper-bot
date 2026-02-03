@@ -1,6 +1,5 @@
 import os
 import time
-import socket
 import requests
 from flask import Flask
 from threading import Thread
@@ -8,92 +7,75 @@ from telebot import TeleBot
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# --- 1. CONFIGURAÇÃO DO SERVIDOR WEB (Essencial para o Koyeb) ---
+# --- 1. CONFIGURAÇÃO DO SERVIDOR WEB (Obrigatório para o Koyeb) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot Solana: Status Online"
+    # Isso responde ao Health Check do Koyeb
+    return "O Bot está rodando!", 200
 
 def run_flask():
-    # Porta 8080 é o padrão do Koyeb
-    app.run(host='0.0.0.0', port=8080)
+    # O Koyeb usa a porta 8080 por padrão
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
-# --- 2. CARREGAMENTO SEGURO DO TOKEN ---
-# Isso evita o erro 'NoneType' que aparece nos seus logs
+# --- 2. INICIALIZAÇÃO DO BOT ---
 TOKEN = os.getenv('TELEGRAM_TOKEN')
+bot = None
 
-def get_bot():
-    if not TOKEN:
-        print("❌ ERRO: A variável 'TELEGRAM_TOKEN' está vazia ou não configurada.")
-        return None
+if TOKEN:
     try:
-        instance = TeleBot(TOKEN)
-        # Teste simples de validação
-        print(f"✅ Token detectado: {TOKEN[:6]}***")
-        return instance
+        # Tira espaços em branco que podem vir do copiar/colar
+        bot = TeleBot(TOKEN.strip())
+        print("✅ Bot do Telegram inicializado.")
     except Exception as e:
-        print(f"❌ Erro ao validar token: {e}")
-        return None
+        print(f"❌ Erro ao validar TOKEN: {e}")
+else:
+    print("⚠️ AVISO: Variável TELEGRAM_TOKEN não encontrada. O bot não responderá.")
 
-bot = get_bot()
-
-# --- 3. LÓGICA DE COTAÇÃO JUPITER (Com correção de DNS) ---
-def get_jupiter_quote(mint_address):
-    url = "https://quote-api.jup.ag/v6/quote"
-    sol_mint = "So11111111111111111111111111111111111111112"
-    
-    params = {
-        "inputMint": sol_mint,
-        "outputMint": mint_address,
-        "amount": "100000000",  # 0.1 SOL
-        "slippageBps": 100
-    }
-
-    # Sessão com tentativas automáticas para vencer o NameResolutionError
+# --- 3. LÓGICA DE COTAÇÃO JUPITER ---
+def get_quote(mint):
+    url = f"https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={mint}&amount=100000000&slippageBps=100"
     session = requests.Session()
-    retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    retries = Retry(total=3, backoff_factor=1)
     session.mount('https://', HTTPAdapter(max_retries=retries))
-
     try:
-        # Timeout curto para não travar o bot em loops infinitos
-        response = session.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"⚠️ Erro de conexão Jupiter: {e}")
+        res = session.get(url, timeout=10)
+        return res.json()
+    except:
         return None
 
-# --- 4. COMANDOS DO TELEGRAM ---
+# --- 4. TRATAMENTO DE MENSAGENS ---
 if bot:
-    @bot.message_handler(commands=['start'])
-    def start(message):
-        bot.reply_to(message, "🤖 Bot Online! Envie o contrato do token Solana para cotação.")
-
     @bot.message_handler(func=lambda m: True)
-    def handle_msg(message):
-        text = message.text.strip()
-        if len(text) > 30: # Filtro básico para endereços Solana
-            bot.reply_to(message, "🔍 Consultando Jupiter API...")
-            data = get_jupiter_quote(text)
+    def handle(m):
+        if len(m.text) > 30:
+            bot.reply_to(m, "Buscando preço...")
+            data = get_quote(m.text)
             if data:
-                price = data.get('outAmount')
-                bot.send_message(message.chat.id, f"✅ Cotação encontrada!\nRetorno: {price} unidades.")
+                bot.send_message(m.chat.id, f"Resultado: {data.get('outAmount')}")
             else:
-                bot.send_message(message.chat.id, "❌ Falha no DNS/API. Tente novamente em 10 segundos.")
+                bot.send_message(m.chat.id, "Erro na API da Jupiter.")
 
-# --- 5. EXECUÇÃO ---
+# --- 5. LOOP PRINCIPAL ---
 if __name__ == "__main__":
-    # Inicia servidor Web para o Health Check
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
+    # Inicia o Flask em uma thread separada
+    server_thread = Thread(target=run_flask)
+    server_thread.daemon = True
+    server_thread.start()
     
+    # Mantém o processo principal rodando
     if bot:
-        print("🚀 Bot iniciando polling...")
-        bot.polling(none_stop=True)
+        print("🚀 Iniciando Polling...")
+        while True:
+            try:
+                bot.polling(none_stop=True, interval=1, timeout=20)
+            except Exception as e:
+                print(f"Erro no Polling: {e}")
+                time.sleep(5)
     else:
-        print("🛑 Bot parado: Corrija o TOKEN nas variáveis de ambiente do Koyeb.")
-        # Mantém o processo vivo para o Flask responder e você ler os logs
+        # Se o bot falhar, mantemos o servidor Flask vivo para o Koyeb não dar erro
+        print("😴 Bot inativo (sem Token), mas servidor Web ativo para evitar erro de deploy.")
         while True:
             time.sleep(60)

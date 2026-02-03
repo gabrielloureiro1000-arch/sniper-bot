@@ -7,34 +7,33 @@ from telebot import TeleBot
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# --- 1. CONFIGURAÇÃO DO SERVIDOR WEB (Obrigatório para o Koyeb) ---
+# --- SERVIDOR WEB PARA HEALTH CHECK ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    # Isso responde ao Health Check do Koyeb
-    return "O Bot está rodando!", 200
+    return "Sniper Bot Online", 200
 
 def run_flask():
-    # O Koyeb usa a porta 8080 por padrão
+    # Usa a porta 8080 exigida pelo Koyeb
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- 2. INICIALIZAÇÃO DO BOT ---
+# --- INICIALIZAÇÃO DO BOT ---
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 bot = None
 
 if TOKEN:
     try:
-        # Tira espaços em branco que podem vir do copiar/colar
+        # strip() remove espaços invisíveis que podem causar erro
         bot = TeleBot(TOKEN.strip())
-        print("✅ Bot do Telegram inicializado.")
+        print("✅ Bot configurado.")
     except Exception as e:
-        print(f"❌ Erro ao validar TOKEN: {e}")
+        print(f"❌ Erro no Token: {e}")
 else:
-    print("⚠️ AVISO: Variável TELEGRAM_TOKEN não encontrada. O bot não responderá.")
+    print("⚠️ Variável TELEGRAM_TOKEN não encontrada.")
 
-# --- 3. LÓGICA DE COTAÇÃO JUPITER ---
+# --- CONSULTA JUPITER ---
 def get_quote(mint):
     url = f"https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={mint}&amount=100000000&slippageBps=100"
     session = requests.Session()
@@ -46,36 +45,37 @@ def get_quote(mint):
     except:
         return None
 
-# --- 4. TRATAMENTO DE MENSAGENS ---
+# --- COMANDOS ---
 if bot:
+    @bot.message_handler(commands=['start'])
+    def start(m):
+        bot.reply_to(m, "🤖 Sniper Bot Ativo! Envie o contrato do token.")
+
     @bot.message_handler(func=lambda m: True)
     def handle(m):
         if len(m.text) > 30:
-            bot.reply_to(m, "Buscando preço...")
+            bot.reply_to(m, "🔍 Verificando preço na Jupiter...")
             data = get_quote(m.text)
             if data:
-                bot.send_message(m.chat.id, f"Resultado: {data.get('outAmount')}")
+                price = data.get('outAmount')
+                bot.send_message(m.chat.id, f"Cotação para 0.1 SOL: {price}")
             else:
-                bot.send_message(m.chat.id, "Erro na API da Jupiter.")
+                bot.send_message(m.chat.id, "❌ Erro na consulta. Tente novamente.")
 
-# --- 5. LOOP PRINCIPAL ---
+# --- EXECUÇÃO ---
 if __name__ == "__main__":
-    # Inicia o Flask em uma thread separada
-    server_thread = Thread(target=run_flask)
-    server_thread.daemon = True
-    server_thread.start()
+    # Inicia Flask primeiro para o deploy passar
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
     
-    # Mantém o processo principal rodando
     if bot:
-        print("🚀 Iniciando Polling...")
+        print("🚀 Polling iniciado...")
         while True:
             try:
                 bot.polling(none_stop=True, interval=1, timeout=20)
             except Exception as e:
-                print(f"Erro no Polling: {e}")
+                print(f"Erro: {e}")
                 time.sleep(5)
     else:
-        # Se o bot falhar, mantemos o servidor Flask vivo para o Koyeb não dar erro
-        print("😴 Bot inativo (sem Token), mas servidor Web ativo para evitar erro de deploy.")
-        while True:
-            time.sleep(60)
+        while True: time.sleep(60)

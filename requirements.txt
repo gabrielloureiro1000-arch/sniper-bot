@@ -1,6 +1,6 @@
 pyTelegramBotAPI
 flask
 requests
-solana==0.35.0
-solders==0.21.0
+solana
+solders
 base58

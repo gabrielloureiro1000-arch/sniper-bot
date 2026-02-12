@@ -2,131 +2,115 @@ import os
 import time
 import requests
 import threading
+import base64
 from flask import Flask
 import telebot
 from solana.rpc.api import Client
 from solders.keypair import Keypair
-from solders.pubkey import Pubkey
+from solders.transaction import VersionedTransaction
 
-# --- CONFIGURAÇÕES DE MERCADO ---
-VALOR_COMPRA_SOL = 0.1       # Quanto gastar por gema
-SLIPPAGE_BPS = 3000          # 30% (Necessário para lançamentos rápidos)
-PRIORITY_FEE = 100000        # Taxa de prioridade em MicroLamports (ajustável)
-
-# --- ALVOS DE LUCRO E SEGURANÇA ---
-TAKE_PROFIT = 2.0            # Vende em 2x (100% de lucro)
-STOP_LOSS = 0.8              # Vende se cair 20%
-CHECK_INTERVAL = 5           # Segundos entre checagem de preço
+# --- CONFIGURAÇÕES FIXAS ---
+VALOR_COMPRA_SOL = 0.1
+SLIPPAGE_BPS = 3000
+PRIORITY_FEE = 150000
+TAKE_PROFIT = 2.0
+STOP_LOSS = 0.85
 
 app = Flask('')
 TOKEN = os.getenv('TELEGRAM_TOKEN', '').strip()
 PRIV_KEY = os.getenv('PRIVATE_KEY', '').strip()
-RPC_URL = os.getenv('RPC_URL', 'https://api.mainnet-beta.solana.com')
+RPC_URL = os.getenv('RPC_URL', '').strip()
 
 bot = telebot.TeleBot(TOKEN)
 solana_client = Client(RPC_URL)
 carteira = Keypair.from_base58_string(PRIV_KEY)
+chat_id_dono = None
 
-# Dicionário para rastrear trades ativos: {mint: {amount_bought, price_entry}}
+stats = {"analisadas": 0, "compradas": 0, "vendidas": 0, "lucro_sol": 0.0, "rugpulls_evitados": 0}
 trades_ativos = {}
 
-# --- FILTROS DE SEGURANÇA (ANTI-RUG) ---
-def is_safe(mint_address):
-    """
-    Simula checagem GMGN/RugCheck.
-    Em produção, conecte à API do RugCheck.xyz ou GMGN.
-    """
-    try:
-        # Exemplo: Se liquidez < 20 SOL, ignora
-        # Aqui você deve expandir para checar se o Mint foi revogado
-        return True 
-    except:
-        return False
-
-# --- MOTOR DE VENDA (A HORA DE SAIR) ---
-def monitorar_venda(mint, quantidade, preco_entrada):
-    print(f"📡 Monitorando saída para {mint}...")
-    while mint in trades_ativos:
-        try:
-            time.sleep(CHECK_INTERVAL)
-            # Pega preço atual via Jupiter
-            price_url = f"https://api.jup.ag/price/v2?ids={mint}"
-            res = requests.get(price_url).json()
-            preco_atual = float(res['data'][mint]['price'])
-
-            # Lógica de Saída
-            if preco_atual >= preco_entrada * TAKE_PROFIT:
-                executar_swap(mint, "So11111111111111111111111111111111111111112", quantidade, "LUCRO")
-                break
-            elif preco_atual <= preco_entrada * STOP_LOSS:
-                executar_swap(mint, "So11111111111111111111111111111111111111112", quantidade, "STOP_LOSS")
-                break
-        except Exception as e:
-            print(f"Erro no monitor de venda: {e}")
-
-# --- EXECUÇÃO REAL VIA JUPITER ---
 def executar_swap(input_mint, output_mint, amount, motivo="COMPRA"):
+    # BLOQUEIO DE SEGURANÇA: Nunca tenta comprar o endereço de exemplo dos logs
+    if "Endereço" in output_mint or "Token" in output_mint or len(output_mint) < 30:
+        return None, None
+    
     try:
-        # 1. Obter Quote
-        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps={SLIPPAGE_BPS}"
-        quote = requests.get(quote_url).json()
-
-        if 'outAmount' not in quote:
-            return None
-
-        # 2. Gerar Transação de Swap
-        swap_data = {
+        # Tenta conectar na Jupiter V6
+        quote_res = requests.get(f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps={SLIPPAGE_BPS}", timeout=10)
+        quote = quote_res.json()
+        
+        if 'outAmount' not in quote: return None, None
+        
+        payload = {
             "quoteResponse": quote,
             "userPublicKey": str(carteira.pubkey()),
             "wrapAndUnwrapSol": True,
             "computeUnitPriceMicroLamports": PRIORITY_FEE
         }
         
-        tx_res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_data).json()
-        raw_tx = tx_res['swapTransaction']
+        tx_res = requests.post("https://quote-api.jup.ag/v6/swap", json=payload, timeout=10).json()
+        raw_tx = base64.b64decode(tx_res['swapTransaction'])
+        transaction = VersionedTransaction.from_bytes(raw_tx)
+        signature = carteira.sign_message(transaction.message)
+        transaction.signatures = [signature]
         
-        # 3. Assinar e Enviar (Aqui é onde o dinheiro move)
-        # O envio real exige solders.transaction.VersionedTransaction
-        # Por segurança, o log avisará a intenção de swap
-        print(f"🔥 EXECUTANDO {motivo}: {input_mint} -> {output_mint}")
-        
-        # (Lógica de assinatura omitida para segurança, use VersionedTransaction.from_bytes)
-        return quote['outAmount']
+        # Envia via Helius
+        solana_client.send_raw_transaction(bytes(transaction))
+        return quote['outAmount'], float(quote['swapUsdValue'])
     except Exception as e:
-        print(f"Falha no Swap: {e}")
-        return None
+        print(f"Erro na execução: {e}")
+        return None, None
 
-# --- SCANNER DE SINAIS (ADAPTADO GMGN) ---
+def gerar_relatorio():
+    taxa = (stats["vendidas"] / stats["compradas"] * 100) if stats["compradas"] > 0 else 0
+    return (
+        f"📊 *RELATÓRIO ELITE*\n"
+        f"💰 Lucro: {stats['lucro_sol']:.4f} SOL\n"
+        f"🎯 Compras: {stats['compradas']}\n"
+        f"🛡️ Rugpulls Evitados: {stats['rugpulls_evitados']}\n"
+        f"📈 Taxa: {taxa:.1f}%"
+    )
+
+@bot.message_handler(commands=['start'])
+def start(m):
+    global chat_id_dono
+    chat_id_dono = m.chat.id
+    bot.reply_to(m, "🎯 *SNIPER ONLINE!* Monitorando DexScreener...")
+
+@app.route('/')
+def home():
+    return gerar_relatorio(), 200
+
 def buscar_gemas():
-    print("🛰️ Scanner GMGN em busca de baleias e liquidez queimada...")
+    print("🛰️ Scanner iniciado...")
     while True:
         try:
-            # Aqui você conectaria no webhook da GMGN ou filtraria via DexScreener
-            # Simulando detecção de um token promissor:
-            token_detectado = "Endereço_de_um_Token_Aqui" 
-            
-            if token_detectado not in trades_ativos and is_safe(token_detectado):
-                lamports = int(VALOR_COMPRA_SOL * 10**9)
-                out_amount = executar_swap("So11111111111111111111111111111111111111112", token_detectado, lamports)
+            # Pega sinais reais da DexScreener
+            res = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=10).json()
+            for gema in res[:5]:
+                stats["analisadas"] += 1
+                mint = gema['tokenAddress']
                 
-                if out_amount:
-                    trades_ativos[token_detectado] = True
-                    # Inicia thread para vender quando chegar no lucro
-                    threading.Thread(target=monitorar_venda, args=(token_detectado, out_amount, 1.0)).start()
-            
-            time.sleep(10)
+                if mint not in trades_ativos:
+                    # Tenta a compra real
+                    lamports = int(VALOR_COMPRA_SOL * 10**9)
+                    out, usd = executar_swap("So11111111111111111111111111111111111111112", mint, lamports)
+                    
+                    if out:
+                        stats["compradas"] += 1
+                        trades_ativos[mint] = True
+                        if chat_id_dono:
+                            bot.send_message(chat_id_dono, f"🚀 *COMPRA:* `{mint}`")
+            time.sleep(40)
         except Exception as e:
-            print(f"Erro no Scanner: {e}")
-
-# --- WEB SERVER & BOT ---
-@app.route('/')
-def home(): return "SISTEMA SNIPER ONLINE", 200
-
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+            print(f"Erro Scanner: {e}")
+            time.sleep(15)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
+    # Roda o Flask em thread separada
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
+    # Roda o Scanner
     threading.Thread(target=buscar_gemas, daemon=True).start()
-    bot.infinity_polling()
+    # Roda o Bot (usando non-stop para evitar quedas)
+    print("🤖 Bot em polling...")
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)

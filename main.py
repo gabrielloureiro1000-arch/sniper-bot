@@ -1,55 +1,49 @@
+import telebot
 import os
 import time
-import requests
 import threading
 from flask import Flask
-import telebot
 
-# --- CONFIGURAÇÃO ---
-TOKEN = os.getenv('TELEGRAM_TOKEN', '').strip()
-app = Flask('')
-
-# Inicializa o bot com um timeout maior para evitar quedas bobas
-bot = telebot.TeleBot(TOKEN, threaded=False)
+# Configurações
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Sniper Vivo e Operante", 200
+    return "Sniper Vivo e Operante"
 
-def buscar_tokens():
-    print("🛰️ Iniciando busca de tokens...")
-    while True:
-        try:
-            # DexScreener costuma ser mais estável no Render
-            response = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=15)
-            if response.status_code == 200:
-                tokens = response.json()
-                print(f"🔎 Scanner: {len(tokens)} tokens analisados.")
-            
-            # Pausa longa para não ser bloqueado por excesso de requisições
-            time.sleep(60)
-        except Exception as e:
-            print(f"❌ Erro no Scanner: {e}")
-            time.sleep(30)
+# COMANDO DE TESTE: Responde ao /start
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    chat_id = message.chat.id
+    msg = f"✅ Sniper Conectado!\n\nSeu Chat ID: `{chat_id}`\n\nAgora eu já consigo te enviar alertas de tokens!"
+    bot.reply_to(message, msg, parse_mode="Markdown")
+    print(f"✅ Interação recebida! Usuário {chat_id} deu start.")
 
-def rodar_bot():
-    print("🤖 Tentando conectar ao Telegram...")
+# ESCUTA TUDO: Se você mandar qualquer coisa, ele responde
+@bot.message_handler(func=lambda message: True)
+def echo_all(message):
+    bot.reply_to(message, "Estou monitorando os tokens... Digite /start para ver seu ID.")
+
+def scanner_mock():
     while True:
-        try:
-            # remove_webhook ajuda a limpar conexões presas que causam o erro 409
-            bot.remove_webhook()
-            bot.polling(none_stop=True, interval=5, timeout=20)
-        except Exception as e:
-            print(f"⚠️ Erro no Bot (provável 409 ou rede): {e}")
-            # Se der erro 409, ele espera 20 segundos para a outra instância morrer
-            time.sleep(20)
+        print("🔎 Scanner: 30 tokens analisados.")
+        time.sleep(60)
+
+def run_bot():
+    bot.remove_webhook()
+    time.sleep(1)
+    print("🤖 Bot em modo de escuta...")
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
 
 if __name__ == "__main__":
-    # 1. Flask para o Render não dar "Port Timeout"
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
+    # Thread do Scanner
+    threading.Thread(target=scanner_mock, daemon=True).start()
     
-    # 2. Scanner em segundo plano
-    threading.Thread(target=buscar_tokens, daemon=True).start()
+    # Thread do Bot
+    threading.Thread(target=run_bot, daemon=True).start()
     
-    # 3. Bot no loop principal
-    rodar_bot()
+    # Flask (Principal para o Render não derrubar)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)

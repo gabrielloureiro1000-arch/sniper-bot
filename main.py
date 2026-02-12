@@ -2,82 +2,54 @@ import os
 import time
 import requests
 import threading
-import base64
 from flask import Flask
 import telebot
-from solana.rpc.api import Client
-from solders.keypair import Keypair
-from solders.transaction import VersionedTransaction
 
-# Configurações
-VALOR_COMPRA_SOL = 0.1
-SLIPPAGE_BPS = 3000
-
-app = Flask('')
+# --- CONFIGURAÇÃO ---
 TOKEN = os.getenv('TELEGRAM_TOKEN', '').strip()
-PRIV_KEY = os.getenv('PRIVATE_KEY', '').strip()
-RPC_URL = os.getenv('RPC_URL', '').strip()
+app = Flask('')
 
-bot = telebot.TeleBot(TOKEN)
-solana_client = Client(RPC_URL)
-carteira = Keypair.from_base58_string(PRIV_KEY)
-
-stats = {"analisadas": 0, "compradas": 0}
-
-def executar_swap(input_mint, output_mint, amount):
-    # Proteção contra endereços inválidos dos logs anteriores
-    if "Endereço" in output_mint or len(output_mint) < 30:
-        return None
-    
-    url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}&slippageBps={SLIPPAGE_BPS}"
-    
-    for _ in range(3): # Tenta 3 vezes em caso de erro de DNS
-        try:
-            response = requests.get(url, timeout=15)
-            quote = response.json()
-            if 'outAmount' in quote:
-                return quote['outAmount']
-        except Exception as e:
-            print(f"⚠️ Tentativa de conexão falhou (DNS/Rede). Tentando novamente...")
-            time.sleep(2)
-    return None
+# Inicializa o bot com um timeout maior para evitar quedas bobas
+bot = telebot.TeleBot(TOKEN, threaded=False)
 
 @app.route('/')
 def home():
-    return f"Sniper Ativo - Analisadas: {stats['analisadas']}", 200
+    return "Sniper Vivo e Operante", 200
 
-def buscar_gemas():
-    print("🛰️ Scanner iniciado...")
+def buscar_tokens():
+    print("🛰️ Iniciando busca de tokens...")
     while True:
         try:
-            # Pegando tokens reais da DexScreener
-            res = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=10).json()
-            for gema in res[:3]:
-                stats["analisadas"] += 1
-                mint = gema['tokenAddress']
-                
-                # Tenta cotar o swap
-                out = executar_swap("So11111111111111111111111111111111111111112", mint, int(VALOR_COMPRA_SOL * 10**9))
-                if out:
-                    print(f"✅ Token válido encontrado: {mint}")
-                    stats["compradas"] += 1
+            # DexScreener costuma ser mais estável no Render
+            response = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=15)
+            if response.status_code == 200:
+                tokens = response.json()
+                print(f"🔎 Scanner: {len(tokens)} tokens analisados.")
             
-            time.sleep(30)
+            # Pausa longa para não ser bloqueado por excesso de requisições
+            time.sleep(60)
         except Exception as e:
-            print(f"Erro no loop principal: {e}")
-            time.sleep(10)
+            print(f"❌ Erro no Scanner: {e}")
+            time.sleep(30)
+
+def rodar_bot():
+    print("🤖 Tentando conectar ao Telegram...")
+    while True:
+        try:
+            # remove_webhook ajuda a limpar conexões presas que causam o erro 409
+            bot.remove_webhook()
+            bot.polling(none_stop=True, interval=5, timeout=20)
+        except Exception as e:
+            print(f"⚠️ Erro no Bot (provável 409 ou rede): {e}")
+            # Se der erro 409, ele espera 20 segundos para a outra instância morrer
+            time.sleep(20)
 
 if __name__ == "__main__":
-    # Inicia Flask
+    # 1. Flask para o Render não dar "Port Timeout"
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
-    # Inicia Scanner
-    threading.Thread(target=buscar_gemas, daemon=True).start()
     
-    # Inicia Bot Telegram com tratamento de erro 409
-    print("🤖 Bot conectando ao Telegram...")
-    while True:
-        try:
-            bot.polling(none_stop=True, interval=3, timeout=20)
-        except Exception as e:
-            print(f"Erro no Polling (Pode ser o 409): {e}")
-            time.sleep(10) # Espera a outra instância morrer no Render
+    # 2. Scanner em segundo plano
+    threading.Thread(target=buscar_tokens, daemon=True).start()
+    
+    # 3. Bot no loop principal
+    rodar_bot()

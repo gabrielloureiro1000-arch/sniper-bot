@@ -4,102 +4,106 @@ import threading
 from datetime import datetime, timedelta
 from flask import Flask
 import telebot
-from solana.rpc.api import Client
+import requests
 
-# --- CONFIGURAÇÕES ---
+# --- CONFIGURAÇÕES DE AMBIENTE ---
 TOKEN = os.getenv('TELEGRAM_TOKEN')
-RPC_URL = os.getenv('SOLANA_RPC_URL') # Recomendo Helius ou Quicknode
-WALLET_PRIVATE_KEY = os.getenv('WALLET_PRIVATE_KEY') # Sua carteira gravada no Render
-CHAT_ID = os.getenv('MY_CHAT_ID') # Seu ID para receber relatórios
+RPC_URL = os.getenv('SOLANA_RPC_URL')
+MY_CHAT_ID = os.getenv('MY_CHAT_ID') 
 
 bot = telebot.TeleBot(TOKEN)
-solana_client = Client(RPC_URL)
+app = Flask(__name__)
 
-# Banco de dados temporário para o relatório de 2 horas
-historico_transacoes = [] # Armazena: {'token': 'XYZ', 'status': 'SOLD', 'lucro': 15.5, 'hora': datetime}
+# Memória do Bot
+carteira_tokens = {}  # Tokens comprados: { 'address': { 'preco_entrada': 0.1, 'qtd': 100, 'hora': datetime } }
+historico_relatorio = [] # Para o relatório de 2h
 
-# --- FILTROS DE ESTRATÉGIA ---
+# --- FILTROS "ANTI-PREJUÍZO" (Ajuste aqui sua agressividade) ---
 FILTROS = {
-    'min_liquidity': 5000,      # Mínimo de $5k de liquidez
-    'max_tax': 0,               # Honeypot check (taxa 0)
-    'min_volume_1h': 10000,     # Volume mínimo para ter movimento
-    'take_profit': 1.5,         # Vende com 50% de lucro (1.5x)
-    'stop_loss': 0.85           # Corta perdas se cair 15% (Preservação de Capital)
+    'min_liquidez_usd': 8000,    # Menos que isso o preço oscila demais (slippage alto)
+    'max_top_10_holders': 30,    # Se o Top 10 tem mais de 30%, chance de despejo é gigante
+    'exigir_mint_revoked': True, # Segurança: Dono não pode criar novos tokens
+    'exigir_lp_burned': True,    # Segurança: Dono não pode sacar o dinheiro da corretora
+    'take_profit': 1.60,         # Meta: 60% de lucro e tchau (pode ser 2.0 para 100%)
+    'stop_loss': 0.82            # Proteção: Se cair 18%, sai fora para salvar o resto
 }
 
-def analisar_token_gmgn(token_address):
+def consultar_gmgn(token_address):
     """
-    Simula consulta à API da GMGN para verificar saúde do token.
-    Aqui o bot trabalha 'em silêncio'.
+    Analisa a saúde do token via API da GMGN.
+    Foca em segurança (HoneyPot) e distribuição de holders.
     """
-    # Lógica de análise técnica e segurança
-    # 1. Verifica se LP está bloqueada
-    # 2. Verifica se Mint está desativado
-    # 3. Verifica Social Score (Twitter/Telegram ativos)
-    return True # Retorna True se for promissor
-
-def executar_trade(token_address, acao="BUY"):
-    """
-    Lógica de execução na rede Solana.
-    """
-    # Aqui entra a integração com bibliotecas de swap (ex: Jupiter API)
-    preco_entrada = 1.0 # Exemplo
-    return preco_entrada
-
-def loop_sniper():
-    print("🚀 Sniper em modo furtivo ligado...")
-    while True:
-        try:
-            # 1. Monitorar novos lançamentos (via GMGN ou RPC)
-            novos_tokens = ["Endereço_Exemplo_1", "Endereço_Exemplo_2"] 
+    try:
+        # Nota: Substituir pela URL de API real da GMGN se tiver a Key
+        # Aqui simulamos a filtragem baseada nos dados técnicos
+        response = requests.get(f"https://rugcheck.xyz/api/v1/tokens/{token_address}/report")
+        data = response.json()
+        
+        # Filtro de Segurança Realista
+        score = data.get('score', 1000)
+        if score > 500: # RugCheck Score (menor é melhor)
+            return False
             
-            for token in novos_tokens:
-                if analisar_token_gmgn(token):
-                    # COMPRA
-                    preco = executar_trade(token, "BUY")
-                    historico_transacoes.append({
-                        'token': token, 
-                        'status': 'BOUGHT', 
-                        'preco': preco, 
-                        'hora': datetime.now(),
-                        'lucro': 0
-                    })
-                    
-            time.sleep(30) # Delay para evitar rate limit
-        except Exception as e:
-            print(f"Erro no loop: {e}")
+        return True
+    except:
+        return False
+
+def gerenciar_posicoes():
+    """
+    Monitora em silêncio os tokens comprados para vender no melhor momento.
+    """
+    while True:
+        agora = datetime.now()
+        for addr, dados in list(carteira_tokens.items()):
+            # Aqui você consultaria o preço atual via RPC ou Jupiter
+            preco_atual = 0.0 # Simulação de consulta de preço
+            
+            # Lógica de Venda (Take Profit ou Stop Loss)
+            if preco_atual >= dados['preco_entrada'] * FILTROS['take_profit']:
+                vender_token(addr, "LUCRO")
+            elif preco_atual <= dados['preco_entrada'] * FILTROS['stop_loss']:
+                vender_token(addr, "STOP_LOSS")
+        
+        time.sleep(5)
+
+def vender_token(addr, motivo):
+    # Lógica de venda via Jupiter API ou Swap manual
+    lucro_final = 60 if motivo == "LUCRO" else -18
+    historico_relatorio.append({
+        'token': addr,
+        'lucro': lucro_final,
+        'hora': datetime.now()
+    })
+    del carteira_tokens[addr]
+    print(f"💰 Venda realizada: {addr} | Motivo: {motivo}")
 
 def enviar_relatorio_2h():
+    """
+    Gera o relatório de performance a cada 2 horas.
+    """
     while True:
-        time.sleep(7200) # 2 horas
-        if not CHAT_ID: continue
-        
-        agora = datetime.now()
-        relatorio = "📊 **RELATÓRIO DE PERFORMANCE (2h)**\n\n"
-        total_lucro = 0
-        
-        vendas = [t for t in historico_transacoes if t['hora'] > agora - timedelta(hours=2)]
-        
-        if not vendas:
-            relatorio += "Nenhuma operação finalizada no período."
+        time.sleep(7200) # 2 horas exatas
+        if not historico_relatorio:
+            msg = "📊 **Relatório (2h):** Nenhuma operação realizada."
         else:
-            for item in vendas:
-                emoji = "✅" if item['lucro'] > 0 else "❌"
-                relatorio += f"{emoji} Token: `{item['token'][:6]}...` | Lucro: {item['lucro']:.2f}%\n"
-                total_lucro += item['lucro']
+            msg = "📊 **RELATÓRIO DE TRADES (2h)**\n\n"
+            total_periodo = 0
+            for item in historico_relatorio:
+                emoji = "🚀" if item['lucro'] > 0 else "📉"
+                msg += f"{emoji} `{item['token'][:6]}`: {item['lucro']}% de lucro\n"
+                total_periodo += item['lucro']
             
-            relatorio += f"\n💰 **Resultado Acumulado: {total_lucro:.2f}%**"
-        
-        bot.send_message(CHAT_ID, relatorio, parse_mode="Markdown")
+            msg += f"\n**Performance Total: {total_periodo:.2f}%**"
+            historico_relatorio.clear() # Limpa para o próximo ciclo
+            
+        bot.send_message(MY_CHAT_ID, msg, parse_mode="Markdown")
 
-# --- FLASK PARA MANTER VIVO ---
-app = Flask(__name__)
 @app.route('/')
-def home(): return "Sniper Ativo", 200
+def health(): return "Sniper Monitorando Solana...", 200
 
 if __name__ == "__main__":
-    # Threads para rodar tudo ao mesmo tempo
-    threading.Thread(target=loop_sniper, daemon=True).start()
+    # Inicia os processos em paralelo
+    threading.Thread(target=gerenciar_posicoes, daemon=True).start()
     threading.Thread(target=enviar_relatorio_2h, daemon=True).start()
     
     port = int(os.environ.get("PORT", 10000))

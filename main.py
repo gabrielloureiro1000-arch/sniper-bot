@@ -4,7 +4,7 @@ import threading
 import json
 import requests
 import base58
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask
 import telebot
 from solana.rpc.api import Client
@@ -17,26 +17,28 @@ RPC_URL = os.getenv('SOLANA_RPC_URL')
 MY_CHAT_ID = os.getenv('MY_CHAT_ID') 
 PRIVATE_KEY_STR = os.getenv('WALLET_PRIVATE_KEY')
 
-# Inicialização
+# Inicialização de APIs
 bot = telebot.TeleBot(TOKEN)
 solana_client = Client(RPC_URL)
 app = Flask(__name__)
 keypair = Keypair.from_bytes(base58.b58decode(PRIVATE_KEY_STR))
 
-# Memória de Operações
-posicoes_abertas = {} # {addr: {preco_entrada, qtd, hora}}
-historico_trades = [] # Para o relatório de 2h
+# Memória Técnica
+posicoes_abertas = {} 
+historico_trades = []
 
-# --- FILTROS DE ESTRATÉGIA ---
+# --- CONFIGURAÇÕES DE TRADE ---
 CONFIG = {
-    'valor_investimento_sol': 0.1,  # Quanto gastar por compra
-    'take_profit': 1.50,            # Vender com 50% de lucro
-    'stop_loss': 0.85,              # Vender se cair 15%
-    'max_score_risco': 400          # Score máximo no RugCheck (quanto menor, mais seguro)
+    'valor_investimento_sol': 0.05, # Valor por trade (recomendo baixo para teste)
+    'take_profit': 1.50,            # +50%
+    'stop_loss': 0.80,              # -20%
+    'max_score_risco': 500          # RugCheck Score (0-1000)
 }
 
+# --- FUNÇÕES DE SEGURANÇA E EXECUÇÃO ---
+
 def check_seguranca(token_addr):
-    """Verifica se o token é um golpe (Rug/Honeypot)"""
+    """Consulta RugCheck para evitar golpes"""
     try:
         url = f"https://rugcheck.xyz/api/v1/tokens/{token_addr}/report"
         res = requests.get(url, timeout=10).json()
@@ -46,14 +48,12 @@ def check_seguranca(token_addr):
         return False
 
 def executar_swap(mint_entrada, mint_saida, amount_sol=None):
-    """Executa a troca real via Jupiter API"""
+    """Executa a compra via Jupiter API v6"""
     try:
-        # 1. Obter Rota
-        amount = int(amount_sol * 10**9) if amount_sol else "all" # Simplificado
-        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={mint_entrada}&outputMint={mint_saida}&amount={amount}&slippageBps=100"
+        amount = int(amount_sol * 10**9) if amount_sol else "all"
+        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={mint_entrada}&outputMint={mint_saida}&amount={amount}&slippageBps=150"
         quote = requests.get(quote_url).json()
 
-        # 2. Criar Transação
         swap_payload = {
             "quoteResponse": quote,
             "userPublicKey": str(keypair.pubkey()),
@@ -61,7 +61,6 @@ def executar_swap(mint_entrada, mint_saida, amount_sol=None):
         }
         tx_res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload).json()
 
-        # 3. Assinar e Enviar
         raw_tx = VersionedTransaction.from_bytes(base58.b58decode(tx_res['swapTransaction']))
         signature = keypair.sign_message(raw_tx.message)
         signed_tx = VersionedTransaction.populate(raw_tx.message, [signature])
@@ -69,58 +68,40 @@ def executar_swap(mint_entrada, mint_saida, amount_sol=None):
         res = solana_client.send_raw_transaction(bytes(signed_tx))
         return str(res.value)
     except Exception as e:
-        print(f"❌ Erro Swap: {e}")
+        print(f"❌ Falha no Swap: {e}")
         return None
 
+# --- LOOPS DE OPERAÇÃO ---
+
 def loop_sniper():
-    """Monitora e compra tokens promissores em silêncio"""
+    """Monitora lançamentos reais na Solana"""
     sol_mint = "So11111111111111111111111111111111111111112"
-    print("🎯 Sniper Rodando e Analisando...")
+    print("🎯 Sniper ativo: Buscando tokens reais...")
     
     while True:
-        # Simulando a captura de novos tokens da GMGN/Raydium
-        # Em produção, aqui você conectaria ao stream de novos tokens
-        token_alvo = "Endereço_Do_Token_Aqui" 
-
-        if token_alvo not in posicoes_abertas:
-            if check_seguranca(token_alvo):
-                tx = executar_swap(sol_mint, token_alvo, CONFIG['valor_investimento_sol'])
-                if tx:
-                    posicoes_abertas[token_alvo] = {
-                        'entrada': 1.0, # Idealmente pegar preço real da Jupiter
-                        'hora': datetime.now()
-                    }
-                    print(f"✅ COMPRADO: {token_alvo} | TX: {tx}")
-        
-        time.sleep(20)
+        try:
+            # Busca tokens recém-listados via DexScreener
+            resp = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10)
+            tokens = resp.json()
+            
+            for t in tokens:
+                addr = t.get('tokenAddress')
+                chain = t.get('chainId')
+                
+                if chain == 'solana' and addr not in posicoes_abertas:
+                    if check_seguranca(addr):
+                        print(f"💎 Oportunidade: {addr}")
+                        tx = executar_swap(sol_mint, addr, CONFIG['valor_investimento_sol'])
+                        if tx:
+                            posicoes_abertas[addr] = {'hora': datetime.now()}
+                            bot.send_message(MY_CHAT_ID, f"🚀 **COMPRA EFETUADA!**\nToken: `{addr}`\n[Ver no Solscan](https://solscan.io/tx/{tx})", parse_mode="Markdown")
+            
+            time.sleep(45) # Intervalo para evitar bloqueio de IP
+        except Exception as e:
+            print(f"⚠️ Erro Loop: {e}")
+            time.sleep(20)
 
 def relatorio_2h():
-    """Envia o balanço de lucros a cada 2 horas"""
+    """Relatório periódico de saúde do bot"""
     while True:
         time.sleep(7200)
-        if not MY_CHAT_ID: continue
-        
-        msg = "📊 **RELATÓRIO SNIPER (2H)**\n\n"
-        if not historico_trades:
-            msg += "Sem trades finalizados no período."
-        else:
-            total = 0
-            for t in historico_trades:
-                emoji = "✅" if t['lucro'] > 0 else "❌"
-                msg += f"{emoji} Token `{t['token'][:5]}` | Lucro: {t['lucro']}%\n"
-                total += t['lucro']
-            msg += f"\n💰 **Resultado Total: {total}%**"
-            historico_trades.clear()
-            
-        bot.send_message(MY_CHAT_ID, msg, parse_mode="Markdown")
-
-@app.route('/')
-def health(): return "ONLINE", 200
-
-if __name__ == "__main__":
-    # Inicia as engrenagens
-    threading.Thread(target=loop_sniper, daemon=True).start()
-    threading.Thread(target=relatorio_2h, daemon=True).start()
-    
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)

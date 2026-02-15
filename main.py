@@ -115,3 +115,37 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     print(f"🌍 Servidor Web na porta {port}")
     app.run(host='0.0.0.0', port=port)
+# --- COMANDOS TELEGRAM ---
+
+@bot.message_handler(commands=['start', 'status'])
+def send_welcome(message):
+    try:
+        bot.reply_to(message, "🚀 **Sniper Online!**\nMonitorando Solana agora...", parse_mode="Markdown")
+    except Exception as e:
+        print(f"Erro ao responder Telegram: {e}")
+
+# --- INICIALIZAÇÃO BLINDADA ---
+
+def safe_polling():
+    """Tenta manter o Telegram vivo mesmo com erros de rede ou conflitos"""
+    print("📡 Iniciando Polling blindado...")
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        except Exception as e:
+            print(f"⚠️ Erro no Telegram (Reiniciando em 5s): {e}")
+            time.sleep(5)
+
+if __name__ == "__main__":
+    # Dispara o Sniper
+    threading.Thread(target=loop_sniper, daemon=True).start()
+    
+    # Dispara o Relatório
+    threading.Thread(target=relatorio_2h, daemon=True).start()
+    
+    # Dispara o Telegram com proteção
+    threading.Thread(target=safe_polling, daemon=True).start()
+    
+    # Flask (Mestre)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)

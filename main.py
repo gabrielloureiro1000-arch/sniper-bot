@@ -20,16 +20,23 @@ bot = telebot.TeleBot(TOKEN)
 solana_client = Client(RPC_URL)
 app = Flask(__name__)
 
-# Tenta carregar a chave, se falhar o bot avisa no log
 try:
     keypair = Keypair.from_bytes(base58.b58decode(PRIVATE_KEY_STR))
-    print(f"✅ Carteira carregada: {keypair.pubkey()}")
+    pubkey = str(keypair.pubkey())
+    print(f"✅ Carteira carregada: {pubkey}")
 except Exception as e:
     print(f"❌ Erro na Private Key: {e}")
 
 posicoes_abertas = {}
 
-# --- FUNÇÕES TÉCNICAS ---
+# --- FUNÇÕES DE MERCADO ---
+
+def get_sol_balance():
+    try:
+        balance = solana_client.get_balance(keypair.pubkey()).value
+        return balance / 10**9 # Converte Lamports para SOL
+    except:
+        return 0
 
 def check_seguranca(token_addr):
     try:
@@ -41,14 +48,10 @@ def check_seguranca(token_addr):
 def executar_swap(mint_entrada, mint_saida, amount_sol):
     try:
         amount_lamports = int(amount_sol * 10**9)
-        quote = requests.get(f"https://quote-api.jup.ag/v6/quote?inputMint={mint_entrada}&outputMint={mint_saida}&amount={amount_lamports}&slippageBps=100").json()
+        quote = requests.get(f"https://quote-api.jup.ag/v6/quote?inputMint={mint_entrada}&outputMint={mint_saida}&amount={amount_lamports}&slippageBps=150", timeout=10).json()
         
-        payload = {
-            "quoteResponse": quote,
-            "userPublicKey": str(keypair.pubkey()),
-            "wrapAndUnwrapSol": True
-        }
-        tx_data = requests.post("https://quote-api.jup.ag/v6/swap", json=payload).json()
+        payload = {"quoteResponse": quote, "userPublicKey": pubkey, "wrapAndUnwrapSol": True}
+        tx_data = requests.post("https://quote-api.jup.ag/v6/swap", json=payload, timeout=10).json()
         
         raw_tx = VersionedTransaction.from_bytes(base58.b58decode(tx_data['swapTransaction']))
         signature = keypair.sign_message(raw_tx.message)
@@ -60,92 +63,62 @@ def executar_swap(mint_entrada, mint_saida, amount_sol):
         print(f"❌ Erro Swap: {e}")
         return None
 
-# --- WORKERS (THREADS) ---
+# --- WORKERS ---
 
 def loop_sniper():
-    print("🎯 Sniper iniciado em segundo plano...")
     sol_mint = "So11111111111111111111111111111111111111112"
     while True:
         try:
-            # Monitora tokens recentes via DexScreener
             resp = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10).json()
             for t in resp:
                 addr = t.get('tokenAddress')
                 if t.get('chainId') == 'solana' and addr not in posicoes_abertas:
                     if check_seguranca(addr):
-                        tx = executar_swap(sol_mint, addr, 0.05) # Compra 0.05 SOL
+                        tx = executar_swap(sol_mint, addr, 0.05)
                         if tx:
                             posicoes_abertas[addr] = True
                             bot.send_message(MY_CHAT_ID, f"✅ **COMPRA!**\n`{addr}`\n[Solscan](https://solscan.io/tx/{tx})", parse_mode="Markdown")
             time.sleep(30)
-        except Exception as e:
-            print(f"⚠️ Erro Sniper: {e}")
-            time.sleep(10)
-
-def relatorio_2h():
-    while True:
-        time.sleep(7200)
-        try:
-            bot.send_message(MY_CHAT_ID, "📊 **Bot Ativo**\nMonitorando novas listagens na Solana.")
-        except: pass
+        except:
+            time.sleep(15)
 
 # --- COMANDOS TELEGRAM ---
 
 @bot.message_handler(commands=['start', 'status'])
-def send_welcome(message):
-    bot.reply_to(message, "🚀 **Sniper Online!**\nUse /status para checar o funcionamento.")
+def send_status(message):
+    bot.reply_to(message, "🎯 **Sniper Online**\nBuscando novos tokens na Solana...")
 
-# --- INICIALIZAÇÃO ---
+@bot.message_handler(commands=['saldo'])
+def send_balance(message):
+    saldo = get_sol_balance()
+    bot.reply_to(message, f"💰 **Saldo Atual:** {saldo:.4f} SOL\nCarteira: `{pubkey}`", parse_mode="Markdown")
 
-@app.route('/')
-def home():
-    return "SERVER_OK", 200
+# --- INICIALIZAÇÃO SEGURA ---
 
-def run_bot():
-    # Esta função inicia as threads secundárias
-    threading.Thread(target=loop_sniper, daemon=True).start()
-    threading.Thread(target=relatorio_2h, daemon=True).start()
-    threading.Thread(target=bot.infinity_polling, daemon=True).start()
-
-if __name__ == "__main__":
-    # Primeiro: dispara o bot em threads
-    run_bot()
+def iniciar_telegram():
+    # Limpa Webhooks e mensagens pendentes para evitar o erro 409
+    print("🧹 Limpando conexões antigas do Telegram...")
+    bot.remove_webhook()
+    requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=True")
+    time.sleep(2)
     
-    # Segundo: Trava no Flask para o Render não fechar
-    port = int(os.environ.get("PORT", 10000))
-    print(f"🌍 Servidor Web na porta {port}")
-    app.run(host='0.0.0.0', port=port)
-# --- COMANDOS TELEGRAM ---
-
-@bot.message_handler(commands=['start', 'status'])
-def send_welcome(message):
-    try:
-        bot.reply_to(message, "🚀 **Sniper Online!**\nMonitorando Solana agora...", parse_mode="Markdown")
-    except Exception as e:
-        print(f"Erro ao responder Telegram: {e}")
-
-# --- INICIALIZAÇÃO BLINDADA ---
-
-def safe_polling():
-    """Tenta manter o Telegram vivo mesmo com erros de rede ou conflitos"""
-    print("📡 Iniciando Polling blindado...")
+    print("📡 Conectando modo exclusivo...")
     while True:
         try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+            bot.polling(none_stop=True, interval=1, timeout=20)
         except Exception as e:
-            print(f"⚠️ Erro no Telegram (Reiniciando em 5s): {e}")
+            print(f"⚠️ Erro de Polling: {e}")
             time.sleep(5)
 
+@app.route('/')
+def health():
+    return "ALIVE", 200
+
 if __name__ == "__main__":
-    # Dispara o Sniper
+    # Threads de background
     threading.Thread(target=loop_sniper, daemon=True).start()
+    threading.Thread(target=iniciar_telegram, daemon=True).start()
     
-    # Dispara o Relatório
-    threading.Thread(target=relatorio_2h, daemon=True).start()
-    
-    # Dispara o Telegram com proteção
-    threading.Thread(target=safe_polling, daemon=True).start()
-    
-    # Flask (Mestre)
+    # Servidor Principal
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)

@@ -32,19 +32,22 @@ CONFIG = {
     "sl": 0.75,            
     "trailing_dist": 0.05, 
     "min_liq": 1200,       
-    "min_vol_5m": 3000     # Aumentei a sensibilidade para 3k
+    "min_vol_5m": 3000     
 }
 
+stats = {"compras": 0, "vendas": 0, "scans": 0}
 blacklist = {} 
+
 session = requests.Session()
 session.mount('https://', HTTPAdapter(max_retries=Retry(total=2, backoff_factor=0.1)))
 
 @app.route('/')
-def home(): return "SNIPER V6.2 - OPERACIONAL", 200
+def home(): 
+    return f"SNIPER V6.3 ATIVO - Scans: {stats['scans']} | Compras: {stats['compras']}", 200
 
 def alertar(msg):
     try: bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-    except: print(msg)
+    except: print(f"Erro Telegram: {msg}")
 
 def jupiter_swap(input_m, output_m, amount, slippage=3500):
     try:
@@ -85,14 +88,20 @@ def gerenciar_venda(addr, sym, p_entrada):
         if vender:
             v_ok, v_res = jupiter_swap(addr, WSOL, CONFIG["entrada_sol"], slippage=5000)
             if v_ok:
-                alertar(f"💰 **VENDA: {sym}** | Lucro: {((lucro-1)*100):.1f}%")
+                stats["vendas"] += 1
+                alertar(f"💰 **VENDA REALIZADA: {sym}**\nLucro final: {((lucro-1)*100):.1f}%")
                 break
 
 def sniper_main():
-    alertar("🦅 **SNIPER V6.2 INICIADO**\nFiltrando SOL nativo | Scan Ativo")
+    alertar("🦅 **SNIPER V6.3 INICIADO**\nMonitorando tokens reais contra SOL...")
+    
     while True:
         try:
-            # Busca focada em tokens pareados com SOL
+            # Incrementa contador de atividade
+            stats["scans"] += 1
+            if stats["scans"] % 50 == 0:
+                print(f"📡 [Heartbeat] Scans realizados: {stats['scans']} | Status: OPERACIONAL")
+
             r = session.get(f"https://api.dexscreener.com/latest/dex/tokens/{WSOL}", timeout=5).json()
             pairs = r.get('pairs', [])
             
@@ -103,7 +112,6 @@ def sniper_main():
                 vol_5m = float(p.get('volume', {}).get('m5', 0))
                 info = p.get('info', {})
 
-                # Filtros de Segurança
                 if addr == WSOL or addr in blacklist or p.get('chainId') != 'solana':
                     continue
 
@@ -111,19 +119,24 @@ def sniper_main():
                 volume_ok = vol_5m > CONFIG["min_vol_5m"]
 
                 if liq >= CONFIG["min_liq"] and (tem_social or volume_ok):
-                    print(f"✅ ALVO QUALIFICADO: {sym}")
+                    print(f"✅ ALVO QUALIFICADO: {sym} (${addr})")
                     ok, res = jupiter_swap(WSOL, addr, CONFIG["entrada_sol"])
                     
                     if ok:
-                        alertar(f"🚀 **COMPRA: {sym}**\nTX: `https://solscan.io/tx/{res['sig']}`")
+                        stats["compras"] += 1
+                        alertar(f"🚀 **COMPRA: {sym}**\nLiq: ${liq:.0f} | Vol5m: ${vol_5m:.0f}\nTX: `https://solscan.io/tx/{res['sig']}`")
                         gerenciar_venda(addr, sym, CONFIG["entrada_sol"])
                         break
                     else:
-                        blacklist[addr] = time.time() + 120
+                        # Evita spam de erro se for apenas falha de liquidez no swap
+                        blacklist[addr] = time.time() + 60
             
-            time.sleep(3) 
-        except: time.sleep(5)
+            time.sleep(4) 
+        except Exception as e:
+            print(f"⚠️ Erro no loop: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
+    # Flask em porta 10000 para o Render
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
     sniper_main()

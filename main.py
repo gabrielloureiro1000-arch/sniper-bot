@@ -11,7 +11,7 @@ from solders.transaction import VersionedTransaction
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# --- CONFIGURAÇÕES DE AMBIENTE ---
+# --- CONFIGURAÇÕES ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 RPC_URL = os.environ.get('RPC_URL')
@@ -22,155 +22,146 @@ app = Flask(__name__)
 solana_client = Client(RPC_URL)
 carteira = Keypair.from_base58_string(PRIVATE_KEY)
 
-# --- PARÂMETROS ESTRATÉGICOS ---
-ESTRATEGIA = {
-    "valor_entrada_sol": 0.01,
-    "take_profit": 1.50,      # Vende com 50% de lucro
-    "stop_loss": 0.85,        # Vende se cair 15%
-    "trailing_stop": True,    # Sobe o stop conforme o lucro aumenta
-    "min_liquidez_usd": 8000,
-    "min_volume_1h": 15000,
-    "max_tokens_simultaneos": 1
+# --- ESTRATÉGIA OUSADA ---
+CONFIG = {
+    "entrada_sol": 0.01,
+    "tp": 1.40,            # Vende com 40% de lucro
+    "sl": 0.82,            # Vende se cair 18% (dá espaço para o token respirar)
+    "trailing_dist": 0.10, # Segue o preço com 10% de distância após bater 20% de lucro
+    "min_liq": 5000,
+    "min_vol_1h": 10000,
 }
 
-# --- CONTROLE DE SESSÃO E RELATÓRIO ---
-stats = {"compras": 0, "vendas": 0, "lucro_total": 0.0, "erros": 0}
+# --- ESTADO DO BOT ---
+stats = {"compras": 0, "vendas": 0, "lucro_sol": 0.0, "erros": 0}
+blacklist = {} # {address: tempo_expiracao}
 start_time = time.time()
+
 session = requests.Session()
 retries = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 session.mount('https://', HTTPAdapter(max_retries=retries))
 
 @app.route('/')
-def home(): return "BOT SNIPER PRO ATIVO", 200
+def home(): return "SNIPER OUSADO OPERACIONAL", 200
 
-# --- FUNÇÕES CORE ---
-
-def enviar_alerta(msg):
+def alertar(msg):
     try: bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-    except: print(f"Erro Telegram: {msg}")
+    except: print(msg)
 
-def gerar_relatorio():
+# Relatório a cada 2 horas
+def loop_relatorio():
     while True:
-        time.sleep(7200) # 2 horas
-        tempo_rodando = round((time.time() - start_time) / 3600, 2)
+        time.sleep(7200)
+        uptime = round((time.time() - start_time) / 3600, 1)
         relatorio = (
-            f"📊 **RELATÓRIO DE PERFORMANCE (2H)**\n\n"
-            f"⏳ Tempo Online: {tempo_rodando}h\n"
+            f"📊 **RELATÓRIO DE PERFORMANCE**\n"
+            f"⏱️ Uptime: {uptime}h\n"
             f"🛒 Compras: {stats['compras']}\n"
             f"💰 Vendas: {stats['vendas']}\n"
-            f"📈 Lucro Estimado: {stats['lucro_total']:.4f} SOL\n"
-            f"⚠️ Erros reportados: {stats['erros']}"
+            f"📈 Lucro Acumulado: {stats['lucro_sol']:.4f} SOL\n"
+            f"⚠️ Erros de Sistema: {stats['erros']}"
         )
-        enviar_alerta(relatorio)
+        alertar(relatorio)
 
-def obter_quote_jupiter(input_mint, output_mint, amount_sol):
-    url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={int(amount_sol * 1e9)}&slippageBps=1500"
+def jupiter_swap(input_m, output_m, amount, slippage=1500):
     try:
-        res = session.get(url, timeout=10)
-        return res.json()
-    except Exception as e:
-        stats["erros"] += 1
-        return None
+        quote = session.get(f"https://quote-api.jup.ag/v6/quote?inputMint={input_m}&outputMint={output_m}&amount={int(amount*1e9)}&slippageBps={slippage}", timeout=10).json()
+        if "outAmount" not in quote: return False, "Sem Liquidez"
 
-def executar_swap(quote_response):
-    try:
-        swap_data = {
-            "quoteResponse": quote_response,
+        data = {
+            "quoteResponse": quote,
             "userPublicKey": str(carteira.pubkey()),
-            "wrapAndUnwrapSol": True,
-            "prioritizationFeeLamports": 2500000 # Taxa agressiva para não falhar
+            "prioritizationFeeLamports": 2500000 
         }
-        res = session.post("https://quote-api.jup.ag/v6/swap", json=swap_data, timeout=15).json()
+        res = session.post("https://quote-api.jup.ag/v6/swap", json=data, timeout=12).json()
         
         raw_tx = base64.b64decode(res['swapTransaction'])
         tx = VersionedTransaction.from_bytes(raw_tx)
         tx = VersionedTransaction(tx.message, [carteira])
         
-        signature = solana_client.send_raw_transaction(bytes(tx))
-        return True, signature.value
+        sig = solana_client.send_raw_transaction(bytes(tx))
+        return True, {"sig": sig.value, "out": int(quote["outAmount"])/1e9}
     except Exception as e:
-        enviar_alerta(f"❌ **ERRO NA TRANSAÇÃO:** {str(e)[:100]}")
-        stats["erros"] += 1
-        return False, None
+        return False, str(e)
 
-def monitorar_venda(token_address, symbol, preco_entrada):
-    """ Gerencia o melhor momento de saída (TP/SL) """
-    max_preco_atingido = preco_entrada
-    SOL_MINT = "So11111111111111111111111111111111111111112"
+def gerenciar_saida(addr, symbol, p_entrada):
+    max_p = p_entrada
+    SOL = "So11111111111111111111111111111111111111112"
     
     while True:
-        time.sleep(15)
-        quote = obter_quote_jupiter(token_address, SOL_MINT, ESTRATEGIA["valor_entrada_sol"])
+        time.sleep(10)
+        ok, res = jupiter_swap(addr, SOL, CONFIG["entrada_sol"]) # Simula venda para ver preço
+        if not ok: continue
         
-        if not quote or "outAmount" not in quote: continue
+        p_atual = res["out"]
+        lucro = p_atual / CONFIG["entrada_sol"]
         
-        preco_atual = int(quote["outAmount"]) / 1e9
-        lucro_atual = preco_atual / ESTRATEGIA["valor_entrada_sol"]
+        if lucro > max_p: max_p = lucro
 
-        # Trailing Stop Loss
-        if lucro_atual > max_preco_atingido:
-            max_preco_atingido = lucro_atual
-
-        # Lógica de Saída Inteligente
-        deve_vender = False
+        vender = False
         motivo = ""
 
-        if lucro_atual >= ESTRATEGIA["take_profit"]:
-            deve_vender, motivo = True, "🚀 TAKE PROFIT ALCANÇADO"
-        elif lucro_atual <= ESTRATEGIA["stop_loss"]:
-            deve_vender, motivo = True, "📉 STOP LOSS ATINGIDO"
-        elif ESTRATEGIA["trailing_stop"] and lucro_atual < (max_preco_atingido * 0.90) and lucro_atual > 1.1:
-            deve_vender, motivo = True, "🔄 TRAILING STOP (Proteção de Lucro)"
+        if lucro >= CONFIG["tp"]:
+            vender, motivo = True, "🎯 TAKE PROFIT"
+        elif lucro <= CONFIG["sl"]:
+            vender, motivo = True, "🛑 STOP LOSS"
+        elif lucro > 1.20 and lucro < (max_p * (1 - CONFIG["trailing_dist"])):
+            vender, motivo = True, "📈 TRAILING STOP"
 
-        if deve_vender:
-            sucesso, tx = executar_swap(quote)
-            if sucesso:
+        if vender:
+            v_ok, v_res = jupiter_swap(addr, SOL, CONFIG["entrada_sol"], slippage=2500)
+            if v_ok:
                 stats["vendas"] += 1
-                stats["lucro_total"] += (preco_atual - ESTRATEGIA["valor_entrada_sol"])
-                enviar_alerta(f"💰 **VENDA EXECUTADA!**\nToken: {symbol}\nMotivo: {motivo}\nLucro: {((lucro_atual-1)*100):.2f}%")
+                stats["lucro_sol"] += (p_atual - CONFIG["entrada_sol"])
+                alertar(f"💰 **VENDA REALIZADA!**\nToken: {symbol}\nMotivo: {motivo}\nLucro: {((lucro-1)*100):.1f}%")
                 break
 
-def sniper_pro():
-    enviar_alerta("🚀 **BOT SNIPER PRO ONLINE**\nModo: Compra Real + Filtros Anti-Rug")
-    SOL_MINT = "So11111111111111111111111111111111111111112"
-
+def sniper_main():
+    alertar("⚡ **SNIPER OUSADO INICIADO**\nBuscando tokens explosivos...")
+    SOL = "So11111111111111111111111111111111111111112"
+    
     while True:
         try:
-            # Busca tokens em tendência com filtros de volume
-            url_dex = "https://api.dexscreener.com/latest/dex/search?q=SOL"
-            r = session.get(url_dex, timeout=10).json()
-            pairs = r.get('pairs', [])
+            # Limpa blacklist
+            agora = time.time()
+            to_del = [k for k, v in blacklist.items() if agora > v]
+            for k in to_del: del blacklist[k]
 
-            for pair in pairs:
-                liq = pair.get('liquidity', {}).get('usd', 0)
-                vol = pair.get('volume', {}).get('h1', 0)
-                addr = pair.get('baseToken', {}).get('address')
-                symbol = pair.get('baseToken', {}).get('symbol')
+            r = session.get("https://api.dexscreener.com/latest/dex/search?q=SOL", timeout=10).json()
+            for p in r.get('pairs', []):
+                addr = p.get('baseToken', {}).get('address')
+                sym = p.get('baseToken', {}).get('symbol')
+                liq = p.get('liquidity', {}).get('usd', 0)
+                vol = p.get('volume', {}).get('h1', 0)
+
+                if addr in blacklist or p.get('chainId') != 'solana': continue
                 
-                # FILTROS DE ENTRADA OUSADA POREM SEGURA
-                if pair.get('chainId') == 'solana' and liq > ESTRATEGIA["min_liquidez_usd"] and vol > ESTRATEGIA["min_volume_1h"]:
-                    
-                    # Evita comprar o que já subiu demais (evita topo)
-                    change_1h = float(pair.get('priceChange', {}).get('h1', 0))
-                    if change_1h > 150: continue # Ignora se subiu mais de 150% em 1h
+                # Filtro de Volume e Liquidez
+                if liq > CONFIG["min_liq"] and vol > CONFIG["min_vol_1h"]:
+                    # Evita "pumps" extremos demais de 1h
+                    change = float(p.get('priceChange', {}).get('h1', 0))
+                    if change > 200: continue 
 
-                    enviar_alerta(f"🎯 **ALVO DETECTADO!**\nToken: {symbol}\nLiq: ${liq}\nVol 1h: ${vol}\nAnalisando entrada...")
-                    
-                    quote = obter_quote_jupiter(SOL_MINT, addr, ESTRATEGIA["valor_entrada_sol"])
-                    if quote:
-                        sucesso, tx = executar_swap(quote)
-                        if sucesso:
-                            stats["compras"] += 1
-                            enviar_alerta(f"✅ **COMPRA REALIZADA!**\nToken: {symbol}\nTX: `https://solscan.io/tx/{tx}`\nMonitorando saída...")
-                            monitorar_venda(addr, symbol, ESTRATEGIA["valor_entrada_sol"])
-                            break 
-            
+                    ok, res = jupiter_swap(SOL, addr, CONFIG["entrada_sol"])
+                    if ok:
+                        stats["compras"] += 1
+                        alertar(f"🚀 **COMPRA REALIZADA!**\nToken: {sym}\nTX: `https://solscan.io/tx/{res['sig']}`")
+                        gerenciar_saida(addr, sym, CONFIG["entrada_sol"])
+                        break
+                    else:
+                        if "Liquidez" in str(res):
+                            blacklist[addr] = agora + 1800 # 30 min de molho
+                        else:
+                            stats["erros"] += 1
+                            # alertar(f"⚠️ Erro Jupiter em {sym}: {res}")
+
             time.sleep(30)
         except Exception as e:
+            stats["erros"] += 1
             print(f"Erro Loop: {e}")
-            time.sleep(10)
+            time.sleep(15)
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
-    threading.Thread(target=gerar_relatorio).start()
-    sniper_pro()
+    threading.Thread(target=loop_relatorio).start()
+    sniper_main()

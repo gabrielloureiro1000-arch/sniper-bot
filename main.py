@@ -10,6 +10,7 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from datetime import datetime
 
 # --- SETUP AMBIENTE ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -24,17 +25,17 @@ carteira = Keypair.from_base58_string(PRIVATE_KEY)
 
 WSOL = "So11111111111111111111111111111111111111112"
 
-# --- CONFIGURAÇÃO AGRESSIVA (V6.4) ---
+# --- CONFIGURAÇÃO INSANA (V6.5) ---
 CONFIG = {
     "entrada_sol": 0.01,
     "tp": 1.70,            
-    "sl": 0.75,            
+    "sl": 0.70,            
     "trailing_dist": 0.05, 
-    "min_liq": 700,        # Antes era 1200
-    "min_vol_5m": 1000     # Antes era 3000
+    "min_liq": 450,        
+    "min_vol_5m": 600     
 }
 
-stats = {"compras": 0, "vendas": 0, "scans": 0}
+stats = {"compras": 0, "vendas": 0, "scans": 0, "inicio": datetime.now()}
 blacklist = {} 
 
 session = requests.Session()
@@ -42,11 +43,24 @@ session.mount('https://', HTTPAdapter(max_retries=Retry(total=2, backoff_factor=
 
 @app.route('/')
 def home(): 
-    return f"SNIPER V6.4 HUNTER - Scans: {stats['scans']} | Compras: {stats['compras']}", 200
+    return f"SNIPER V6.5 INSANE - Scans: {stats['scans']} | Compras: {stats['compras']}", 200
 
 def alertar(msg):
     try: bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-    except: print(f"Telegram Erro: {msg}")
+    except: print(f"Erro Telegram: {msg}")
+
+# --- FUNÇÃO DE RELATÓRIO AUTOMÁTICO (2 EM 2 HORAS) ---
+def loop_relatorio():
+    while True:
+        time.sleep(7200) # 2 horas em segundos
+        tempo_online = datetime.now() - stats["inicio"]
+        msg = (f"📊 **RELATÓRIO DE ATIVIDADE**\n\n"
+               f"🕒 Online há: `{str(tempo_online).split('.')[0]}`\n"
+               f"🔍 Scans realizados: `{stats['scans']}`\n"
+               f"🚀 Compras feitas: `{stats['compras']}`\n"
+               f"💰 Vendas feitas: `{stats['vendas']}`\n"
+               f"📡 Status: `OPERACIONAL`")
+        alertar(msg)
 
 def jupiter_swap(input_m, output_m, amount, slippage=3500):
     try:
@@ -81,7 +95,7 @@ def gerenciar_venda(addr, sym, p_entrada):
                 break
 
 def sniper_main():
-    alertar("🦅 **MODO HUNTER V6.4 ATIVADO**\nFiltros mais sensíveis para capturar novas gems!")
+    alertar("🦅 **MODO INSANO V6.5 ATIVADO**\nAlvos: Liq > $450 | Vol > $600\nRelatórios automáticos a cada 2h.")
     while True:
         try:
             stats["scans"] += 1
@@ -101,25 +115,27 @@ def sniper_main():
                 if addr == WSOL or addr in blacklist or p.get('chainId') != 'solana':
                     continue
 
-                # LOG DE PROXIMIDADE (DEBUG)
-                if liq > 500 and liq < CONFIG["min_liq"]:
-                    print(f"👀 Quase lá: {sym} tem ${liq:.0f} liq (precisa de ${CONFIG['min_liq']})")
-
                 tem_social = any([info.get('socials'), info.get('websites')])
                 volume_ok = vol_5m > CONFIG["min_vol_5m"]
 
                 if liq >= CONFIG["min_liq"] and (tem_social or volume_ok):
-                    print(f"🎯 ALVO DETECTADO: {sym}")
+                    print(f"🎯 ALVO QUALIFICADO: {sym} (Liq: {liq})")
                     ok, res = jupiter_swap(WSOL, addr, CONFIG["entrada_sol"])
                     if ok:
                         stats["compras"] += 1
-                        alertar(f"🚀 **COMPRA: {sym}**\nLiq: ${liq:.0f} | Vol: ${vol_5m:.0f}\nTX: `https://solscan.io/tx/{res['sig']}`")
+                        alertar(f"🚀 **COMPRA REALIZADA: {sym}**\nLiq: ${liq:.0f} | Vol: ${vol_5m:.0f}\nTX: `https://solscan.io/tx/{res['sig']}`")
                         gerenciar_venda(addr, sym, CONFIG["entrada_sol"])
                         break
                     else: blacklist[addr] = time.time() + 60
             time.sleep(3) 
-        except: time.sleep(5)
+        except Exception as e:
+            print(f"Erro no loop: {e}")
+            time.sleep(5)
 
 if __name__ == "__main__":
+    # Thread 1: Servidor Flask (Keep-alive)
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
+    # Thread 2: Relatórios a cada 2h
+    threading.Thread(target=loop_relatorio, daemon=True).start()
+    # Thread Principal: Sniper
     sniper_main()

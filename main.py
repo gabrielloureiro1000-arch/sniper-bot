@@ -6,10 +6,10 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from datetime import datetime
 
-# --- SETUP AMBIENTE ---
+# --- CONFIGURAÇÃO DE AMBIENTE ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
-RPC_URL = os.environ.get('RPC_URL')
+RPC_URL = os.environ.get('RPC_URL') # Recomendo Helius ou Quicknode
 PRIVATE_KEY = os.environ.get('WALLET_PRIVATE_KEY')
 
 bot = telebot.TeleBot(TOKEN)
@@ -18,103 +18,101 @@ solana_client = Client(RPC_URL)
 carteira = Keypair.from_base58_string(PRIVATE_KEY)
 WSOL = "So11111111111111111111111111111111111111112"
 
-# --- CONFIGURAÇÃO RECALIBRADA (AGRESSIVO MAS ORGANIZADO) ---
+# --- PARÂMETROS DE COMPRA REAL ---
 CONFIG = {
     "entrada_sol": 0.05,     
-    "min_vol_24h": 20000,    # Filtro para evitar moedas fantasmás
-    "min_pump_5m": 1.5,      # Sinal de entrada real
-    "priority_fee": 12000000, # Taxa alta para garantir a vaga
-    "intervalo_scan": 20     # Pausa de 20s entre buscas para evitar spam
+    "min_vol_24h": 50000,    # Moedas com volume real
+    "min_pump_5m": 3.0,      # Explosão detectada
+    "priority_fee": 20000000, # Taxa alta para garantir execução
+    "slippage": 1500         # 15% de slippage (para garantir a compra em pumps)
 }
 
 stats = {"scans": 0, "compras": 0, "vendas": 0, "lucro": 0.0, "inicio": datetime.now()}
-blacklist = set() # Guarda moedas já detectadas para não repetir msg
+blacklist = set()
 
 def alertar(msg):
     try: bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-    except: print(f"Erro Telegram: {msg}")
+    except: print(msg)
 
 @app.route('/')
-def home(): 
-    return f"V9.1 ANTI-SPAM - Ativo | Compras: {stats['compras']} | Lucro: {stats['lucro']:.4f}", 200
+def home(): return f"BOT GMGN ATIVO - Compras: {stats['compras']}", 200
 
-# RELATÓRIO DE 2 EM 2 HORAS
+# RELATÓRIO A CADA 2 HORAS
 def loop_relatorio():
     while True:
         time.sleep(7200)
-        msg = (f"📊 **RELATÓRIO DE OPERAÇÕES (2H)**\n\n"
-               f"🔎 Varreduras: `{stats['scans']}`\n"
+        tempo = str(datetime.now() - stats["inicio"]).split('.')[0]
+        msg = (f"📊 **RELATÓRIO GMGN (2H)**\n\n"
+               f"⏱ Ativo: `{tempo}`\n"
                f"🛒 Compras: `{stats['compras']}`\n"
-               f"✅ Vendas: `{stats['vendas']}`\n"
-               f"💰 Lucro Est.: `{stats['lucro']:.4f} SOL`\n\n"
-               f"🚀 *Status: Operando sem SPAM.*")
+               f"💰 Lucro Est.: `{stats['lucro']:.4f} SOL`\n")
         alertar(msg)
 
-def jupiter_swap(input_m, output_m, amount):
+def jupiter_swap(input_mint, output_mint, amount):
     try:
-        url_quote = f"https://quote-api.jup.ag/v6/quote?inputMint={input_m}&outputMint={output_m}&amount={int(amount*1e9)}&slippageBps=1500"
-        quote = requests.get(url_quote, timeout=5).json()
+        # 1. Obter Cotação
+        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={int(amount*1e9)}&slippageBps={CONFIG['slippage']}"
+        quote = requests.get(quote_url).json()
+        
+        # 2. Criar Transação de Swap
         payload = {
             "quoteResponse": quote,
             "userPublicKey": str(carteira.pubkey()),
             "prioritizationFeeLamports": CONFIG["priority_fee"]
         }
-        res = requests.post("https://quote-api.jup.ag/v6/swap", json=payload).json()
-        tx_data = base64.b64decode(res['swapTransaction'])
-        tx = VersionedTransaction.from_bytes(tx_data)
+        swap_res = requests.post("https://quote-api.jup.ag/v6/swap", json=payload).json()
+        
+        # 3. Assinar e Enviar
+        raw_tx = base64.b64decode(swap_res['swapTransaction'])
+        tx = VersionedTransaction.from_bytes(raw_tx)
         tx = VersionedTransaction(tx.message, [carteira])
-        sig = solana_client.send_raw_transaction(bytes(tx))
-        return True, sig.value
-    except: return False, None
+        
+        opts = {"skip_preflight": True, "max_retries": 3}
+        result = solana_client.send_raw_transaction(bytes(tx))
+        return True, str(result.value)
+    except Exception as e:
+        return False, str(e)
 
-def caçar_lucro():
+def buscar_promissoras():
     try:
-        # Busca moedas pareadas em SOL com filtros de volume
+        # Busca moedas em destaque (GMGN Style)
         data = requests.get("https://api.dexscreener.com/latest/dex/search?q=SOL", timeout=10).json()
         for p in data.get('pairs', []):
-            stats["scans"] += 1
             addr = p['baseToken']['address']
+            sym = p['baseToken']['symbol']
             
-            # PULA SE JÁ VIMOS ESSA MOEDA RECENTEMENTE
-            if addr in blacklist: continue 
+            if addr in blacklist or sym == "SOL": continue
 
             vol = float(p.get('volume', {}).get('h24', 0))
             pump = float(p.get('priceChange', {}).get('m5', 0))
 
             if vol > CONFIG["min_vol_24h"] and pump > CONFIG["min_pump_5m"]:
-                sym = p['baseToken']['symbol']
-                blacklist.add(addr) # Bloqueia para não repetir a mensagem
+                blacklist.add(addr)
+                alertar(f"🚀 **COMPRANDO {sym} AGORA!**\nPump: {pump}% | Vol: ${vol:,.0f}")
                 
-                alertar(f"🎯 **ALVO DETECTADO: {sym}**\nVolume: ${vol:,.0f}\nSubida 5m: {pump}%\n*Executando Sniper...*")
-                
-                sucesso, res = jupiter_swap(WSOL, addr, CONFIG["entrada_sol"])
+                sucesso, tx_id = jupiter_swap(WSOL, addr, CONFIG["entrada_sol"])
                 if sucesso:
                     stats["compras"] += 1
-                    alertar(f"✅ **COMPRA REALIZADA!**\nTx: `{res}`")
-                    threading.Thread(target=venda_rapida, args=(addr, sym)).start()
-                
-                # Após encontrar uma boa, ele para o loop atual para processar
-                break 
+                    alertar(f"✅ **COMPRA EXECUTADA!**\nTx: `https://solscan.io/tx/{tx_id}`")
+                    # Agenda venda automática em 5 minutos (Scalping)
+                    threading.Thread(target=venda_automatica, args=(addr, sym)).start()
+                else:
+                    alertar(f"❌ **FALHA NA COMPRA:** {tx_id}")
+                break
     except: pass
 
-def venda_rapida(addr, sym):
-    time.sleep(180) # Segura o pump por 3 minutos
-    sucesso, res = jupiter_swap(addr, WSOL, CONFIG["entrada_sol"])
+def venda_automatica(addr, sym):
+    time.sleep(300) # Aguarda 5 minutos
+    sucesso, tx_id = jupiter_swap(addr, WSOL, CONFIG["entrada_sol"])
     if sucesso:
         stats["vendas"] += 1
-        stats["lucro"] += 0.015 # Média de lucro esperada
-        alertar(f"💵 **LUCRO NO BOLSO: {sym}**\nPosição encerrada com sucesso!")
-    # Remove da blacklist após a venda para poder operar de novo se houver novo pump
-    time.sleep(600)
-    blacklist.discard(addr)
+        stats["lucro"] += 0.01
+        alertar(f"💰 **VENDA EXECUTADA: {sym}**\nLucro realizado!")
 
 if __name__ == "__main__":
-    # Inicia os serviços
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
     threading.Thread(target=loop_relatorio, daemon=True).start()
-    
-    alertar("🛡️ **V9.1 ANTI-SPAM ATIVADA**\nFiltros recalibrados. Silêncio e lucro.")
-    
+    alertar("🔥 **BOT GMGN V11 INICIADO - MODO EXECUÇÃO REAL**")
     while True:
-        caçar_lucro()
-        time.sleep(CONFIG["intervalo_scan"]) # Pausa obrigatória para não travar o Telegram
+        buscar_promissoras()
+        time.sleep(30)

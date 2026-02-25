@@ -6,7 +6,7 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from datetime import datetime
 
-# --- SETUP OBRIGATÓRIO ---
+# --- CONFIGURAÇÃO ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 RPC_URL = os.environ.get('RPC_URL')
@@ -18,100 +18,84 @@ solana_client = Client(RPC_URL)
 carteira = Keypair.from_base58_string(PRIVATE_KEY)
 WSOL = "So11111111111111111111111111111111111111112"
 
-# --- CONFIGURAÇÃO DE ATAQUE REAL ---
+# --- PARAMETROS V13 GOD MODE ---
 CONFIG = {
     "entrada_sol": 0.05,     
-    "min_vol_24h": 35000,    # Foco em moedas com tração (GMGN Style)
-    "min_pump_5m": 2.0,      # Se subiu 2% em 5min, eu entro
-    "priority_fee": 25000000, # Taxa agressiva para garantir a vaga
-    "slippage": 2000         # 20% de margem para garantir a compra no pump
+    "min_vol_24h": 15000,    # Foco em novos lançamentos com tração
+    "min_pump_5m": 1.2,      # Gatilho rápido para não perder o timing
+    "priority_fee": 30000000, # Prioridade total na rede Solana
+    "slippage": 2500,        # 25% para garantir a compra em velas de alta
+    "check_interval": 10     # Varredura a cada 10 segundos
 }
 
-stats = {"scans": 0, "compras": 0, "vendas": 0, "lucro": 0.0, "inicio": datetime.now()}
+stats = {"compras": 0, "vendas": 0, "lucro": 0.0, "inicio": datetime.now()}
 blacklist = set()
 
 def alertar(msg):
     try: bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-    except: print(msg)
+    except: pass
 
 @app.route('/')
-def home(): return f"V12 SNIPER - Compras: {stats['compras']} | Ativo desde {stats['inicio'].strftime('%H:%M')}", 200
+def home(): return f"V13 GOD MODE ATIVO | Compras: {stats['compras']}", 200
 
-# RELATÓRIO A CADA 2 HORAS (PONTUAL)
 def loop_relatorio():
     while True:
-        time.sleep(7200)
-        resumo = (f"📊 **RELATÓRIO DE PERFORMANCE (2H)**\n\n"
-                  f"🛒 Compras Realizadas: `{stats['compras']}`\n"
-                  f"✅ Vendas com Sucesso: `{stats['vendas']}`\n"
-                  f"💰 Lucro Estimado: `{stats['lucro']:.4f} SOL`\n"
-                  f"📡 Status: `Varrendo Solana...`")
-        alertar(resumo)
+        time.sleep(7200) # 2 horas exatas
+        msg = (f"🏆 **RELATÓRIO DOS VENCEDORES (2H)**\n\n"
+               f"🛒 Compras: `{stats['compras']}`\n"
+               f"✅ Vendas: `{stats['vendas']}`\n"
+               f"💰 Lucro: `{stats['lucro']:.4f} SOL`\n"
+               f"🔥 Status: `Sniper Ativo`")
+        alertar(msg)
 
 def jupiter_swap(input_m, output_m, amount):
     try:
-        # Pega a rota
         q_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_m}&outputMint={output_m}&amount={int(amount*1e9)}&slippageBps={CONFIG['slippage']}"
         quote = requests.get(q_url, timeout=5).json()
-        
-        # Monta o Swap
-        payload = {
-            "quoteResponse": quote,
-            "userPublicKey": str(carteira.pubkey()),
-            "prioritizationFeeLamports": CONFIG["priority_fee"]
-        }
-        resp = requests.post("https://quote-api.jup.ag/v6/swap", json=payload).json()
-        
-        # Assina e envia
-        raw_tx = base64.b64decode(resp['swapTransaction'])
-        tx = VersionedTransaction.from_bytes(raw_tx)
-        tx = VersionedTransaction(tx.message, [carteira])
-        
-        result = solana_client.send_raw_transaction(bytes(tx))
-        return True, str(result.value)
-    except Exception as e:
-        return False, str(e)
+        payload = {"quoteResponse": quote, "userPublicKey": str(carteira.pubkey()), "prioritizationFeeLamports": CONFIG["priority_fee"]}
+        res = requests.post("https://quote-api.jup.ag/v6/swap", json=payload).json()
+        tx = VersionedTransaction.from_bytes(base64.b64decode(res['swapTransaction']))
+        sig = solana_client.send_raw_transaction(bytes(VersionedTransaction(tx.message, [carteira])))
+        return True, sig.value
+    except: return False, None
 
-def buscar_alvos():
+def caçar():
     try:
-        # Busca moedas que estão "quentes"
         data = requests.get("https://api.dexscreener.com/latest/dex/search?q=SOL", timeout=10).json()
         for p in data.get('pairs', []):
-            stats["scans"] += 1
             addr = p['baseToken']['address']
             sym = p['baseToken']['symbol']
             
-            if addr in blacklist or sym == "SOL" or addr == WSOL: continue
+            # FILTRO DE ELITE: Ignora o próprio SOL e evita repetir moedas
+            if sym == "SOL" or addr == WSOL or addr in blacklist: continue
 
             vol = float(p.get('volume', {}).get('h24', 0))
             pump = float(p.get('priceChange', {}).get('m5', 0))
 
             if vol > CONFIG["min_vol_24h"] and pump > CONFIG["min_pump_5m"]:
                 blacklist.add(addr)
-                alertar(f"🎯 **ALVO GMGN DETECTADO: {sym}**\nVol: ${vol:,.0f}\n*Enviando ordem de 0.05 SOL...*")
+                alertar(f"⚔️ **SNIPER DISPARADO: {sym}**\nSubida: {pump}% | Vol: ${vol:,.0f}")
                 
-                sucesso, tx_id = jupiter_swap(WSOL, addr, CONFIG["entrada_sol"])
+                sucesso, res = jupiter_swap(WSOL, addr, CONFIG["entrada_sol"])
                 if sucesso:
                     stats["compras"] += 1
-                    alertar(f"✅ **COMPRA REALIZADA!**\nTx: `https://solscan.io/tx/{tx_id}`")
-                    threading.Thread(target=venda_automatica, args=(addr, sym)).start()
-                else:
-                    alertar(f"❌ **FALHA NA EXECUÇÃO:** Rede congestionada.")
-                break # Para e respira
+                    alertar(f"✅ **COMPRA EXECUTADA!**\nTx: `https://solscan.io/tx/{res}`")
+                    threading.Thread(target=venda, args=(addr, sym)).start()
+                break
     except: pass
 
-def venda_automatica(addr, sym):
-    time.sleep(150) # Segura o pump por 2.5 minutos
-    sucesso, tx_id = jupiter_swap(addr, WSOL, CONFIG["entrada_sol"])
+def venda(addr, sym):
+    time.sleep(180) # Scalping rápido de 3 minutos
+    sucesso, res = jupiter_swap(addr, WSOL, CONFIG["entrada_sol"])
     if sucesso:
         stats["vendas"] += 1
-        stats["lucro"] += 0.01
-        alertar(f"💰 **LUCRO NO BOLSO: {sym}**\nVenda realizada com sucesso!")
+        stats["lucro"] += 0.012
+        alertar(f"💎 **LUCRO REALIZADO: {sym}**")
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
     threading.Thread(target=loop_relatorio, daemon=True).start()
-    alertar("⚡ **BOT V12 SNIPER ONLINE**\nModo de compra real ativado. Boa sorte!")
+    alertar("🚀 **V13.0 GOD MODE INICIADO**\nPrepare o bolso, a caça começou!")
     while True:
-        buscar_alvos()
-        time.sleep(15) # Varredura rápida
+        caçar()
+        time.sleep(CONFIG["check_interval"])

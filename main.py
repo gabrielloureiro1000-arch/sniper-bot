@@ -83,4 +83,47 @@ def analisar_e_comprar():
                            f"📌 **Nome:** {sym}\n"
                            f"📊 **Volume (5m):** `${vol_m5:,.0f}`\n"
                            f"🔥 **Pressão:** {buys}B / {sells}S\n"
-                           f"🔗 **Análise GMGN:** [CLIQUE AQUI]({gmgn_
+                           f"🔗 **Análise GMGN:** [CLIQUE AQUI]({gmgn_link})\n\n"
+                           f"⚡ *Iniciando compra automática...*")
+
+                    ok, res = jupiter_swap(WSOL, addr, CONFIG["entrada_sol"])
+                    
+                    if ok:
+                        stats["compras"] += 1
+                        alertar(f"✅ **COMPRA REALIZADA!**\nTx: `https://solscan.io/tx/{res}`")
+                        threading.Thread(target=gestao_saida, args=(addr, sym)).start()
+                    else:
+                        stats["erros"] += 1
+                        alertar(f"❌ **ERRO AO COMPRAR {sym}:**\n`{res[:60]}`")
+                    break
+        except: pass
+        time.sleep(3)
+
+def gestao_saida(addr, sym):
+    # Saída inteligente: 25% de lucro ou -15% de stop
+    start_time = time.time()
+    while time.time() - start_time < 1200:
+        try:
+            q_url = f"https://quote-api.jup.ag/v6/quote?inputMint={addr}&outputMint={WSOL}&amount={int(CONFIG['entrada_sol']*1e9)}&slippageBps=100"
+            quote = requests.get(q_url, timeout=5).json()
+            if "outAmount" in quote:
+                atual = int(quote["outAmount"]) / 1e9
+                ratio = atual / CONFIG["entrada_sol"]
+
+                if ratio >= 1.25 or ratio <= 0.85:
+                    ok, res = jupiter_swap(addr, WSOL, CONFIG["entrada_sol"])
+                    if ok:
+                        stats["vendas"] += 1
+                        stats["lucro"] += (atual - CONFIG["entrada_sol"])
+                        alertar(f"💰 **VENDA EXECUTADA: {sym}**\nResultado: {ratio:.2f}x\nTx: `https://solscan.io/tx/{res}`")
+                        return
+            time.sleep(5)
+        except: pass
+    # Venda de segurança
+    jupiter_swap(addr, WSOL, CONFIG["entrada_sol"])
+
+if __name__ == "__main__":
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
+    threading.Thread(target=loop_relatorio, daemon=True).start()
+    alertar("🚀 **ORACLE EYE V22 ATIVADO**\nConectado à GMGN.ai. Buscando lucro...")
+    analisar_e_comprar()

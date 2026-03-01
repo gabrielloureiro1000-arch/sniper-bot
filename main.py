@@ -117,4 +117,9 @@ def monitorar_venda(addr, sym):
             time.sleep(1) # Monitoramento segundo a segundo
         except: time.sleep(2)
     
-    # Venda forçada por tempo
+    # Venda forçada por tempo (Proteção contra queda lenta)
+    jupiter_swap(addr, WSOL, CONFIG["entrada_sol"], is_sell=True)
+
+if __name__ == "__main__":
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
+    buscar_rastros_baleia()

@@ -5,7 +5,7 @@ from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-# --- CONFIGURAÇÃO ---
+# --- CONFIG ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 RPC_URL = os.environ.get('RPC_URL')
@@ -17,72 +17,77 @@ solana_client = Client(RPC_URL)
 carteira = Keypair.from_base58_string(PRIVATE_KEY)
 WSOL = "So11111111111111111111111111111111111111112"
 
-# --- CONFIGURAÇÃO BERSERKER (MUITO AGRESSIVA) ---
-CONFIG = {
-    "entrada_sol": 0.01,
-    "min_buys_1m": 3,          # APENAS 3 COMPRAS E ELE ENTRA
-    "min_liq_usd": 500,        # QUALQUER LIQUIDEZ ELE ENTRA
-    "take_profit": 1.10,       # BUSCA 10% E SAI
-    "priority_fee": 200000000, # 0.20 SOL (TAXA PARA NÃO FALHAR)
-    "slippage": 9900           # 99% (COMPRA A QUALQUER CUSTO)
-}
-
-stats = {"compras": 0, "lucro": 0.0, "analisados": 0}
+@app.route('/')
+def home(): return "EXTERMINATOR V26 - STATUS: CAÇANDO", 200
 
 def alertar(msg):
     try: bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
     except: print(msg)
 
-@app.route('/')
-def home(): return f"BERSERKER V25 - ANALISADOS: {stats['analisados']}", 200
-
-def jupiter_swap(input_m, output_m, amount):
+def jupiter_swap(input_m, output_m, amount, is_sell=False):
     try:
-        url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_m}&outputMint={output_m}&amount={int(amount*1e9)}&slippageBps={CONFIG['slippage']}"
+        # Slippage de 99% para compra, 20% para venda rápida
+        slip = 9900 if not is_sell else 2000
+        url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_m}&outputMint={output_m}&amount={int(amount*1e9)}&slippageBps={slip}"
         q = requests.get(url, timeout=5).json()
-        payload = {"quoteResponse": q, "userPublicKey": str(carteira.pubkey()), "prioritizationFeeLamports": CONFIG["priority_fee"]}
+        
+        payload = {
+            "quoteResponse": q,
+            "userPublicKey": str(carteira.pubkey()),
+            "prioritizationFeeLamports": 250000000 # 0.25 SOL (Prioridade Total)
+        }
         s = requests.post("https://quote-api.jup.ag/v6/swap", json=payload).json()
         tx = VersionedTransaction.from_bytes(base64.b64decode(s['swapTransaction']))
         res = solana_client.send_raw_transaction(bytes(VersionedTransaction(tx.message, [carteira])))
         return True, str(res.value)
     except Exception as e: return False, str(e)
 
-def caçada_berserker():
-    alertar("👺 **MODO BERSERKER ATIVADO**\nFiltros de segurança desativados. Atirando em tudo!")
+def monitorar_e_vender(addr, sym):
+    time.sleep(45) # 45 segundos de "paciência"
+    alertar(f"🔄 **TENTANDO REALIZAR LUCRO EM {sym}...**")
+    for _ in range(3): # Tenta 3 vezes para não ficar preso no token
+        ok, res = jupiter_swap(addr, WSOL, 0.01, is_sell=True)
+        if ok:
+            alertar(f"💰 **VENDA CONCLUÍDA!** Tx: `{res}`")
+            return
+        time.sleep(5)
+
+def exterminator_loop():
+    print("🔥 EXTERMINATOR V26 INICIADO...")
+    alertar("💀 **EXTERMINATOR V26 ONLINE** - FILTROS NO CHÃO.")
     blacklist = set()
+    
     while True:
         try:
-            # Puxa os tokens mais recentes e ativos
-            data = requests.get("https://api.dexscreener.com/latest/dex/search?q=SOL", timeout=10).json()
-            for pair in data.get('pairs', [])[:50]:
-                stats["analisados"] += 1
+            # Busca tokens em alta real
+            res = requests.get("https://api.dexscreener.com/latest/dex/search?q=SOL", timeout=10)
+            data = res.json()
+            pairs = data.get('pairs', [])
+            
+            print(f"🔎 Analisando {len(pairs)} pares...")
+
+            for pair in pairs[:40]:
                 addr = pair['baseToken']['address']
-                if addr in blacklist: continue
+                if addr in blacklist or addr == WSOL: continue
                 
+                # CRITÉRIO DE TIRO: Volume rápido + Liquidez mínima de $300
                 m1_buys = int(pair.get('txns', {}).get('m1', {}).get('buys', 0))
                 liq = float(pair.get('liquidity', {}).get('usd', 0))
 
-                # GATILHO BERSERKER: Quase nada de trava
-                if m1_buys >= CONFIG["min_buys_1m"] and liq >= CONFIG["min_liq_usd"]:
+                if m1_buys >= 3 and liq >= 300:
                     blacklist.add(addr)
-                    alertar(f"🎯 **ALVO IDENTIFICADO: {pair['baseToken']['symbol']}**\nCompras/min: {m1_buys}\nGMGN: https://gmgn.ai/sol/token/{addr}")
+                    alertar(f"🎯 **ALVO DETECTADO: {pair['baseToken']['symbol']}**\n💸 Liquidez: `${liq}`\n🔗 https://gmgn.ai/sol/token/{addr}")
                     
-                    ok, res = jupiter_swap(WSOL, addr, CONFIG["entrada_sol"])
+                    ok, res_tx = jupiter_swap(WSOL, addr, 0.01)
                     if ok:
-                        stats["compras"] += 1
-                        alertar(f"✅ **COMPRADO!** Tx: `{res}`")
-                        # Gerencia saída rápido (Thread separada)
-                        threading.Thread(target=saida_berserker, args=(addr,)).start()
-                    else:
-                        alertar(f"❌ **ERRO:** `{res[:50]}`")
-        except: pass
+                        alertar(f"✅ **TIRO CERTEIRO! COMPRADO.** Tx: `{res_tx}`")
+                        threading.Thread(target=monitorar_e_vender, args=(addr, pair['baseToken']['symbol'])).start()
+                        break 
+        except Exception as e:
+            print(f"Erro: {e}")
+        
         time.sleep(2)
-
-def saida_berserker(addr):
-    time.sleep(30) # Espera 30 segundos e tenta vender com lucro
-    jupiter_swap(addr, WSOL, CONFIG["entrada_sol"])
-    alertar(f"💰 **VENDA TENTADA (TAKE PROFIT)**")
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
-    caçada_berserker()
+    exterminator_loop()

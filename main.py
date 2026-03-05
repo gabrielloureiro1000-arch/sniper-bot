@@ -12,7 +12,7 @@ from solders.transaction import VersionedTransaction
 
 from flask import Flask
 
-# ---------------- CONFIG ----------------
+# ================= CONFIG =================
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -26,28 +26,31 @@ CONFIG = {
 
     "trade_amount_sol": 0.02,
 
-    "min_liquidity_usd": 1500,
-    "min_volume_usd": 400,
+    "min_liquidity_usd": 700,
+    "min_volume_usd": 150,
 
-    "take_profit": 1.35,
-    "stop_loss": 0.70,
+    "take_profit": 1.30,
+    "stop_loss": 0.75,
+
+    "trailing_start": 1.20,
+    "trailing_stop": 0.90,
 
     "max_hold_minutes": 6,
 
-    "scan_interval": 6,
+    "scan_interval": 5,
 
     "max_active_trades": 2,
 
-    "slippage_bps": 1500,
+    "slippage_bps": 1800,
 
-    "priority_fee": 1200000,
+    "priority_fee": 1500000,
 
     "blacklist_time": 3600
 }
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# ---------------- INIT ----------------
+# ================= INIT =================
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -65,7 +68,7 @@ stats = {
     "trades": 0
 }
 
-# ---------------- REQUEST ----------------
+# ================= REQUEST =================
 
 def safe_get_json(url):
 
@@ -82,7 +85,7 @@ def safe_get_json(url):
         return None
 
 
-# ---------------- TELEGRAM ----------------
+# ================= TELEGRAM =================
 
 def alert(msg):
 
@@ -96,10 +99,11 @@ def alert(msg):
         )
 
     except Exception as e:
+
         print("telegram error", e)
 
 
-# ---------------- BALANCE ----------------
+# ================= BALANCE =================
 
 def get_token_balance(token):
 
@@ -121,10 +125,11 @@ def get_token_balance(token):
         return amount / (10 ** decimals)
 
     except:
+
         return 0
 
 
-# ---------------- JUPITER SWAP ----------------
+# ================= JUPITER SWAP =================
 
 def jupiter_swap(input_mint, output_mint, amount):
 
@@ -169,7 +174,7 @@ def jupiter_swap(input_mint, output_mint, amount):
         return False, None
 
 
-# ---------------- PRICE ----------------
+# ================= PRICE =================
 
 def get_price(token):
 
@@ -190,10 +195,11 @@ def get_price(token):
         return float(pairs[0]["priceUsd"])
 
     except:
+
         return None
 
 
-# ---------------- FILTER ----------------
+# ================= FILTER =================
 
 def valid_pair(pair):
 
@@ -223,10 +229,11 @@ def valid_pair(pair):
         return True
 
     except:
+
         return False
 
 
-# ---------------- BUY ----------------
+# ================= BUY =================
 
 def buy_token(pair):
 
@@ -253,7 +260,8 @@ def buy_token(pair):
         "token": token,
         "symbol": symbol,
         "buy_price": price,
-        "buy_time": time.time()
+        "buy_time": time.time(),
+        "highest_price": price
     }
 
     active_trades.append(trade)
@@ -274,7 +282,7 @@ def buy_token(pair):
     ).start()
 
 
-# ---------------- SELL ----------------
+# ================= SELL =================
 
 def sell_token(trade):
 
@@ -318,7 +326,7 @@ def sell_token(trade):
         active_trades.remove(trade)
 
 
-# ---------------- MONITOR ----------------
+# ================= MONITOR =================
 
 def monitor_trade(trade):
 
@@ -329,8 +337,12 @@ def monitor_trade(trade):
         price = get_price(trade["token"])
 
         if not price:
-            time.sleep(5)
+
+            time.sleep(4)
             continue
+
+        if price > trade["highest_price"]:
+            trade["highest_price"] = price
 
         if price >= trade["buy_price"] * CONFIG["take_profit"]:
             sell_token(trade)
@@ -340,14 +352,22 @@ def monitor_trade(trade):
             sell_token(trade)
             return
 
+        if price >= trade["buy_price"] * CONFIG["trailing_start"]:
+
+            if price <= trade["highest_price"] * CONFIG["trailing_stop"]:
+
+                sell_token(trade)
+                return
+
         if time.time() - start > CONFIG["max_hold_minutes"] * 60:
+
             sell_token(trade)
             return
 
-        time.sleep(5)
+        time.sleep(4)
 
 
-# ---------------- BLACKLIST CLEAN ----------------
+# ================= BLACKLIST CLEAN =================
 
 def clean_blacklist():
 
@@ -359,7 +379,7 @@ def clean_blacklist():
             del blacklist[token]
 
 
-# ---------------- SCANNER ----------------
+# ================= SCANNER =================
 
 def scan_tokens():
 
@@ -376,12 +396,12 @@ def scan_tokens():
             data = safe_get_json(url)
 
             if not data:
-                time.sleep(10)
+                time.sleep(8)
                 continue
 
             pairs = data.get("pairs", [])
 
-            for pair in pairs[:60]:
+            for pair in pairs[:80]:
 
                 token = pair["baseToken"]["address"]
 
@@ -402,7 +422,7 @@ def scan_tokens():
         time.sleep(CONFIG["scan_interval"])
 
 
-# ---------------- REPORT ----------------
+# ================= REPORT =================
 
 def report_loop():
 
@@ -421,7 +441,7 @@ def report_loop():
         alert(msg)
 
 
-# ---------------- SERVER ----------------
+# ================= SERVER =================
 
 app = Flask(__name__)
 
@@ -434,7 +454,7 @@ def run_server():
     app.run(host="0.0.0.0", port=10000)
 
 
-# ---------------- START ----------------
+# ================= START =================
 
 if __name__ == "__main__":
 

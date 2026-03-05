@@ -10,6 +10,8 @@ from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
+from flask import Flask
+
 # ---------------- CONFIG ----------------
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -22,11 +24,13 @@ WSOL = "So11111111111111111111111111111111111111112"
 
 CONFIG = {
     "trade_amount_sol": 0.02,
-    "min_liquidity_usd": 3000,
-    "take_profit": 1.5,
-    "stop_loss": 0.7,
+    "min_liquidity_usd": 5000,
+    "min_volume_usd": 2000,
+    "take_profit": 1.4,
+    "stop_loss": 0.75,
     "max_hold_minutes": 10,
-    "slippage_bps": 1500,
+    "scan_interval": 8,
+    "slippage_bps": 1200,
     "priority_fee": 1000000
 }
 
@@ -63,13 +67,14 @@ def safe_get_json(url):
             return None
 
         if not r.text:
-            print("empty response")
             return None
 
         return r.json()
 
     except Exception as e:
+
         print("request error", e)
+
         return None
 
 
@@ -78,13 +83,16 @@ def safe_get_json(url):
 def alert(msg):
 
     try:
+
         bot.send_message(
             CHAT_ID,
             msg,
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
+
     except Exception as e:
+
         print("telegram error", e)
 
 
@@ -98,7 +106,7 @@ def jupiter_swap(input_mint, output_mint, amount):
 
         quote = safe_get_json(url)
 
-        if not quote or "error" in quote:
+        if not quote:
             return False, None
 
         payload = {
@@ -152,7 +160,34 @@ def get_price(token):
         return float(pairs[0]["priceUsd"])
 
     except:
+
         return None
+
+
+# ---------------- FILTER ----------------
+
+def valid_pair(pair):
+
+    try:
+
+        liquidity = float(pair.get("liquidity", {}).get("usd", 0))
+        volume = float(pair.get("volume", {}).get("h24", 0))
+        price = float(pair.get("priceUsd", 0))
+
+        if liquidity < CONFIG["min_liquidity_usd"]:
+            return False
+
+        if volume < CONFIG["min_volume_usd"]:
+            return False
+
+        if price <= 0:
+            return False
+
+        return True
+
+    except:
+
+        return False
 
 
 # ---------------- BUY ----------------
@@ -162,7 +197,7 @@ def buy_token(pair):
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
 
-    print("buying", symbol)
+    print("🚀 buying", symbol)
 
     ok, tx = jupiter_swap(
         WSOL,
@@ -187,10 +222,10 @@ def buy_token(pair):
     stats["trades"] += 1
 
     alert(
-        f"🚀 *COMPRA EXECUTADA*\n\n"
+        f"🚀 *COMPRA*\n\n"
         f"Token: {symbol}\n"
         f"Preço: ${price}\n"
-        f"Tx: https://solscan.io/tx/{tx}"
+        f"https://solscan.io/tx/{tx}"
     )
 
     threading.Thread(
@@ -229,14 +264,13 @@ def sell_token(trade):
         stats["losses"] += 1
 
     alert(
-        f"💰 *VENDA EXECUTADA*\n\n"
+        f"💰 *VENDA*\n\n"
         f"Token: {symbol}\n"
         f"Resultado: {round((pnl-1)*100,2)}%\n"
-        f"Tx: https://solscan.io/tx/{tx}"
+        f"https://solscan.io/tx/{tx}"
     )
 
-    if trade in active_trades:
-        active_trades.remove(trade)
+    active_trades.remove(trade)
 
 
 # ---------------- MONITOR ----------------
@@ -250,7 +284,7 @@ def monitor_trade(trade):
         price = get_price(trade["token"])
 
         if not price:
-            time.sleep(5)
+            time.sleep(4)
             continue
 
         if price >= trade["buy_price"] * CONFIG["take_profit"]:
@@ -265,7 +299,7 @@ def monitor_trade(trade):
             sell_token(trade)
             return
 
-        time.sleep(5)
+        time.sleep(4)
 
 
 # ---------------- SCANNER ----------------
@@ -276,30 +310,26 @@ def scan_tokens():
 
         try:
 
-            print("🔎 Scanning tokens...")
+            print("🔎 scanning...")
 
-            url = "https://api.dexscreener.com/latest/dex/pairs/solana"
+            url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
 
-            r = safe_get_json(url)
+            data = safe_get_json(url)
 
-            if not r:
+            if not data:
                 time.sleep(10)
                 continue
 
-            pairs = r.get("pairs", [])
+            pairs = data.get("pairs", [])
 
-            for pair in pairs[:50]:
+            for pair in pairs[:40]:
 
                 token = pair["baseToken"]["address"]
 
                 if token in blacklist:
                     continue
 
-                liquidity = float(
-                    pair.get("liquidity", {}).get("usd", 0)
-                )
-
-                if liquidity < CONFIG["min_liquidity_usd"]:
+                if not valid_pair(pair):
                     continue
 
                 blacklist.add(token)
@@ -310,7 +340,7 @@ def scan_tokens():
 
             print("scan error", e)
 
-        time.sleep(8)
+        time.sleep(CONFIG["scan_interval"])
 
 
 # ---------------- REPORT ----------------
@@ -332,12 +362,26 @@ def report_loop():
         alert(msg)
 
 
+# ---------------- SERVER (RENDER FIX) ----------------
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot running"
+
+
+def run_server():
+    app.run(host="0.0.0.0", port=10000)
+
+
 # ---------------- START ----------------
 
 if __name__ == "__main__":
 
-    alert("🐙 BOT INICIADO")
+    alert("🐙 BOT SNIPER INICIADO")
 
+    threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=scan_tokens, daemon=True).start()
     threading.Thread(target=report_loop, daemon=True).start()
 

@@ -23,16 +23,25 @@ PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")
 WSOL = "So11111111111111111111111111111111111111112"
 
 CONFIG = {
+
     "trade_amount_sol": 0.02,
-    "min_liquidity_usd": 5000,
-    "min_volume_usd": 2000,
-    "take_profit": 1.4,
-    "stop_loss": 0.75,
-    "max_hold_minutes": 10,
-    "scan_interval": 8,
-    "slippage_bps": 1200,
-    "priority_fee": 1000000,
-    "max_active_trades": 3,
+
+    "min_liquidity_usd": 1500,
+    "min_volume_usd": 400,
+
+    "take_profit": 1.35,
+    "stop_loss": 0.70,
+
+    "max_hold_minutes": 6,
+
+    "scan_interval": 6,
+
+    "max_active_trades": 2,
+
+    "slippage_bps": 1500,
+
+    "priority_fee": 1200000,
+
     "blacklist_time": 3600
 }
 
@@ -43,9 +52,11 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 bot = telebot.TeleBot(TOKEN)
 
 solana_client = Client(RPC_URL)
+
 wallet = Keypair.from_base58_string(PRIVATE_KEY)
 
 blacklist = {}
+
 active_trades = []
 
 stats = {
@@ -54,7 +65,7 @@ stats = {
     "trades": 0
 }
 
-# ---------------- SAFE REQUEST ----------------
+# ---------------- REQUEST ----------------
 
 def safe_get_json(url):
 
@@ -88,7 +99,7 @@ def alert(msg):
         print("telegram error", e)
 
 
-# ---------------- TOKEN BALANCE ----------------
+# ---------------- BALANCE ----------------
 
 def get_token_balance(token):
 
@@ -102,9 +113,10 @@ def get_token_balance(token):
         if not resp.value:
             return 0
 
-        amount = int(resp.value[0].account.data.parsed["info"]["tokenAmount"]["amount"])
+        data = resp.value[0].account.data.parsed["info"]["tokenAmount"]
 
-        decimals = int(resp.value[0].account.data.parsed["info"]["tokenAmount"]["decimals"])
+        amount = int(data["amount"])
+        decimals = int(data["decimals"])
 
         return amount / (10 ** decimals)
 
@@ -191,6 +203,11 @@ def valid_pair(pair):
         volume = float(pair.get("volume", {}).get("h24", 0))
         price = float(pair.get("priceUsd", 0))
 
+        txns = pair.get("txns", {}).get("h24", {})
+
+        buys = txns.get("buys", 0)
+        sells = txns.get("sells", 0)
+
         if liquidity < CONFIG["min_liquidity_usd"]:
             return False
 
@@ -198,6 +215,9 @@ def valid_pair(pair):
             return False
 
         if price <= 0:
+            return False
+
+        if buys <= sells:
             return False
 
         return True
@@ -216,7 +236,7 @@ def buy_token(pair):
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
 
-    print("🚀 buying", symbol)
+    print("🚀 BUY", symbol)
 
     ok, tx = jupiter_swap(
         WSOL,
@@ -327,7 +347,7 @@ def monitor_trade(trade):
         time.sleep(5)
 
 
-# ---------------- CLEAN BLACKLIST ----------------
+# ---------------- BLACKLIST CLEAN ----------------
 
 def clean_blacklist():
 
@@ -361,7 +381,7 @@ def scan_tokens():
 
             pairs = data.get("pairs", [])
 
-            for pair in pairs[:40]:
+            for pair in pairs[:60]:
 
                 token = pair["baseToken"]["address"]
 
@@ -418,7 +438,7 @@ def run_server():
 
 if __name__ == "__main__":
 
-    alert("🐙 BOT SNIPER INICIADO")
+    alert("🐙 SNIPER BOT INICIADO")
 
     threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=scan_tokens, daemon=True).start()

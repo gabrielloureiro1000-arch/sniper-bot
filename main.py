@@ -30,6 +30,10 @@ CONFIG = {
     "priority_fee": 1000000
 }
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
+
 # ---------------- INIT ----------------
 
 bot = telebot.TeleBot(TOKEN)
@@ -45,6 +49,29 @@ stats = {
     "losses": 0,
     "trades": 0
 }
+
+# ---------------- SAFE REQUEST ----------------
+
+def safe_get_json(url):
+
+    try:
+
+        r = requests.get(url, headers=HEADERS, timeout=10)
+
+        if r.status_code != 200:
+            print("HTTP error", r.status_code)
+            return None
+
+        if not r.text:
+            print("empty response")
+            return None
+
+        return r.json()
+
+    except Exception as e:
+        print("request error", e)
+        return None
+
 
 # ---------------- TELEGRAM ----------------
 
@@ -69,9 +96,9 @@ def jupiter_swap(input_mint, output_mint, amount):
 
         url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={int(amount*1e9)}&slippageBps={CONFIG['slippage_bps']}"
 
-        quote = requests.get(url, timeout=10).json()
+        quote = safe_get_json(url)
 
-        if "error" in quote:
+        if not quote or "error" in quote:
             return False, None
 
         payload = {
@@ -83,6 +110,7 @@ def jupiter_swap(input_mint, output_mint, amount):
         swap = requests.post(
             "https://quote-api.jup.ag/v6/swap",
             json=payload,
+            headers=HEADERS,
             timeout=10
         ).json()
 
@@ -111,7 +139,10 @@ def get_price(token):
 
         url = f"https://api.dexscreener.com/latest/dex/tokens/{token}"
 
-        data = requests.get(url).json()
+        data = safe_get_json(url)
+
+        if not data:
+            return None
 
         pairs = data.get("pairs", [])
 
@@ -164,7 +195,8 @@ def buy_token(pair):
 
     threading.Thread(
         target=monitor_trade,
-        args=(trade,)
+        args=(trade,),
+        daemon=True
     ).start()
 
 
@@ -186,6 +218,9 @@ def sell_token(trade):
 
     price = get_price(token)
 
+    if not price:
+        return
+
     pnl = price / trade["buy_price"]
 
     if pnl >= 1:
@@ -200,7 +235,8 @@ def sell_token(trade):
         f"Tx: https://solscan.io/tx/{tx}"
     )
 
-    active_trades.remove(trade)
+    if trade in active_trades:
+        active_trades.remove(trade)
 
 
 # ---------------- MONITOR ----------------
@@ -240,9 +276,15 @@ def scan_tokens():
 
         try:
 
+            print("🔎 Scanning tokens...")
+
             url = "https://api.dexscreener.com/latest/dex/pairs/solana"
 
-            r = requests.get(url).json()
+            r = safe_get_json(url)
+
+            if not r:
+                time.sleep(10)
+                continue
 
             pairs = r.get("pairs", [])
 
@@ -268,7 +310,7 @@ def scan_tokens():
 
             print("scan error", e)
 
-        time.sleep(5)
+        time.sleep(8)
 
 
 # ---------------- REPORT ----------------
@@ -280,7 +322,7 @@ def report_loop():
         time.sleep(7200)
 
         msg = (
-            "📊 *RELATÓRIO KRAKEN*\n\n"
+            "📊 *RELATÓRIO BOT*\n\n"
             f"Trades: {stats['trades']}\n"
             f"Vitórias: {stats['wins']}\n"
             f"Perdas: {stats['losses']}\n"
@@ -294,11 +336,10 @@ def report_loop():
 
 if __name__ == "__main__":
 
-    alert("🐙 BOT KRAKEN INICIADO")
+    alert("🐙 BOT INICIADO")
 
-    threading.Thread(target=scan_tokens).start()
-
-    threading.Thread(target=report_loop).start()
+    threading.Thread(target=scan_tokens, daemon=True).start()
+    threading.Thread(target=report_loop, daemon=True).start()
 
     while True:
         time.sleep(60)

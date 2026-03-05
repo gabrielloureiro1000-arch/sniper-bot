@@ -31,12 +31,12 @@ CONFIG = {
     "max_hold_minutes": 10,
     "scan_interval": 8,
     "slippage_bps": 1200,
-    "priority_fee": 1000000
+    "priority_fee": 1000000,
+    "max_active_trades": 3,
+    "blacklist_time": 3600
 }
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ---------------- INIT ----------------
 
@@ -45,7 +45,7 @@ bot = telebot.TeleBot(TOKEN)
 solana_client = Client(RPC_URL)
 wallet = Keypair.from_base58_string(PRIVATE_KEY)
 
-blacklist = set()
+blacklist = {}
 active_trades = []
 
 stats = {
@@ -63,18 +63,11 @@ def safe_get_json(url):
         r = requests.get(url, headers=HEADERS, timeout=10)
 
         if r.status_code != 200:
-            print("HTTP error", r.status_code)
-            return None
-
-        if not r.text:
             return None
 
         return r.json()
 
-    except Exception as e:
-
-        print("request error", e)
-
+    except:
         return None
 
 
@@ -92,8 +85,31 @@ def alert(msg):
         )
 
     except Exception as e:
-
         print("telegram error", e)
+
+
+# ---------------- TOKEN BALANCE ----------------
+
+def get_token_balance(token):
+
+    try:
+
+        resp = solana_client.get_token_accounts_by_owner(
+            wallet.pubkey(),
+            {"mint": token}
+        )
+
+        if not resp.value:
+            return 0
+
+        amount = int(resp.value[0].account.data.parsed["info"]["tokenAmount"]["amount"])
+
+        decimals = int(resp.value[0].account.data.parsed["info"]["tokenAmount"]["decimals"])
+
+        return amount / (10 ** decimals)
+
+    except:
+        return 0
 
 
 # ---------------- JUPITER SWAP ----------------
@@ -102,9 +118,11 @@ def jupiter_swap(input_mint, output_mint, amount):
 
     try:
 
-        url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={int(amount*1e9)}&slippageBps={CONFIG['slippage_bps']}"
+        lamports = int(amount * 1e9)
 
-        quote = safe_get_json(url)
+        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={lamports}&slippageBps={CONFIG['slippage_bps']}"
+
+        quote = safe_get_json(quote_url)
 
         if not quote:
             return False, None
@@ -160,7 +178,6 @@ def get_price(token):
         return float(pairs[0]["priceUsd"])
 
     except:
-
         return None
 
 
@@ -186,13 +203,15 @@ def valid_pair(pair):
         return True
 
     except:
-
         return False
 
 
 # ---------------- BUY ----------------
 
 def buy_token(pair):
+
+    if len(active_trades) >= CONFIG["max_active_trades"]:
+        return
 
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
@@ -242,10 +261,15 @@ def sell_token(trade):
     token = trade["token"]
     symbol = trade["symbol"]
 
+    balance = get_token_balance(token)
+
+    if balance <= 0:
+        return
+
     ok, tx = jupiter_swap(
         token,
         WSOL,
-        CONFIG["trade_amount_sol"]
+        balance
     )
 
     if not ok:
@@ -270,7 +294,8 @@ def sell_token(trade):
         f"https://solscan.io/tx/{tx}"
     )
 
-    active_trades.remove(trade)
+    if trade in active_trades:
+        active_trades.remove(trade)
 
 
 # ---------------- MONITOR ----------------
@@ -284,7 +309,7 @@ def monitor_trade(trade):
         price = get_price(trade["token"])
 
         if not price:
-            time.sleep(4)
+            time.sleep(5)
             continue
 
         if price >= trade["buy_price"] * CONFIG["take_profit"]:
@@ -299,7 +324,19 @@ def monitor_trade(trade):
             sell_token(trade)
             return
 
-        time.sleep(4)
+        time.sleep(5)
+
+
+# ---------------- CLEAN BLACKLIST ----------------
+
+def clean_blacklist():
+
+    now = time.time()
+
+    for token in list(blacklist.keys()):
+
+        if now - blacklist[token] > CONFIG["blacklist_time"]:
+            del blacklist[token]
 
 
 # ---------------- SCANNER ----------------
@@ -311,6 +348,8 @@ def scan_tokens():
         try:
 
             print("🔎 scanning...")
+
+            clean_blacklist()
 
             url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
 
@@ -332,7 +371,7 @@ def scan_tokens():
                 if not valid_pair(pair):
                     continue
 
-                blacklist.add(token)
+                blacklist[token] = time.time()
 
                 buy_token(pair)
 
@@ -362,7 +401,7 @@ def report_loop():
         alert(msg)
 
 
-# ---------------- SERVER (RENDER FIX) ----------------
+# ---------------- SERVER ----------------
 
 app = Flask(__name__)
 

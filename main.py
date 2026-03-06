@@ -22,23 +22,21 @@ PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")
 
 WSOL = "So11111111111111111111111111111111111111112"
 
-STABLES = [
-"Es9vMFrzaCERmJfrxYgM4Zqz9j4kY1zJ6q8R2ZxJ9p",
-"EPjFWdd5AufqSSqeM2q9b8YvCk4Xk8i1i8m8YdB1x"
+BLOCKED_SYMBOLS = [
+"SOL",
+"USDC",
+"USDT"
 ]
 
 CONFIG = {
 
     "trade_amount_sol": 0.02,
 
-    "min_liquidity_usd": 700,
-    "min_volume_usd": 150,
+    "min_liquidity_usd": 800,
+    "min_volume_usd": 200,
 
     "take_profit": 1.30,
     "stop_loss": 0.75,
-
-    "trailing_start": 1.20,
-    "trailing_stop": 0.90,
 
     "max_hold_minutes": 6,
 
@@ -48,9 +46,8 @@ CONFIG = {
 
     "slippage_bps": 1800,
 
-    "priority_fee": 1500000,
+    "priority_fee": 1500000
 
-    "blacklist_time": 3600
 }
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -63,9 +60,11 @@ solana_client = Client(RPC_URL)
 
 wallet = Keypair.from_base58_string(PRIVATE_KEY)
 
-blacklist = {}
+blacklist = set()
 
 active_trades = []
+
+buy_lock = False
 
 stats = {
     "wins": 0,
@@ -103,36 +102,35 @@ def alert(msg):
             disable_web_page_preview=True
         )
 
-    except Exception as e:
-        print("telegram error", e)
+    except:
+        pass
 
 
-# ================= BALANCE =================
+# ================= PRICE =================
 
-def get_token_balance(token):
+def get_price(token):
 
     try:
 
-        resp = solana_client.get_token_accounts_by_owner(
-            wallet.pubkey(),
-            {"mint": token}
-        )
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{token}"
 
-        if not resp.value:
-            return 0
+        data = safe_get_json(url)
 
-        data = resp.value[0].account.data.parsed["info"]["tokenAmount"]
+        if not data:
+            return None
 
-        amount = int(data["amount"])
-        decimals = int(data["decimals"])
+        pairs = data.get("pairs", [])
 
-        return amount / (10 ** decimals)
+        if not pairs:
+            return None
+
+        return float(pairs[0]["priceUsd"])
 
     except:
-        return 0
+        return None
 
 
-# ================= JUPITER SWAP =================
+# ================= JUPITER =================
 
 def jupiter_swap(input_mint, output_mint, amount):
 
@@ -177,44 +175,24 @@ def jupiter_swap(input_mint, output_mint, amount):
         return False, None
 
 
-# ================= PRICE =================
-
-def get_price(token):
-
-    try:
-
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{token}"
-
-        data = safe_get_json(url)
-
-        if not data:
-            return None
-
-        pairs = data.get("pairs", [])
-
-        if not pairs:
-            return None
-
-        return float(pairs[0]["priceUsd"])
-
-    except:
-        return None
-
-
 # ================= FILTER =================
 
 def valid_pair(pair):
 
     try:
 
+        token = pair["baseToken"]["address"]
+        symbol = pair["baseToken"]["symbol"]
+
+        if token == WSOL:
+            return False
+
+        if symbol in BLOCKED_SYMBOLS:
+            return False
+
         liquidity = float(pair.get("liquidity", {}).get("usd", 0))
         volume = float(pair.get("volume", {}).get("h24", 0))
         price = float(pair.get("priceUsd", 0))
-
-        txns = pair.get("txns", {}).get("h24", {})
-
-        buys = txns.get("buys", 0)
-        sells = txns.get("sells", 0)
 
         if liquidity < CONFIG["min_liquidity_usd"]:
             return False
@@ -223,9 +201,6 @@ def valid_pair(pair):
             return False
 
         if price <= 0:
-            return False
-
-        if buys <= sells:
             return False
 
         return True
@@ -238,11 +213,21 @@ def valid_pair(pair):
 
 def buy_token(pair):
 
+    global buy_lock
+
+    if buy_lock:
+        return
+
     if len(active_trades) >= CONFIG["max_active_trades"]:
         return
 
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
+
+    if token in blacklist:
+        return
+
+    buy_lock = True
 
     print("🚀 BUY", symbol)
 
@@ -253,6 +238,7 @@ def buy_token(pair):
     )
 
     if not ok:
+        buy_lock = False
         return
 
     price = float(pair["priceUsd"])
@@ -261,18 +247,19 @@ def buy_token(pair):
         "token": token,
         "symbol": symbol,
         "buy_price": price,
-        "buy_time": time.time(),
-        "highest_price": price
+        "buy_time": time.time()
     }
 
     active_trades.append(trade)
+
+    blacklist.add(token)
 
     stats["trades"] += 1
 
     alert(
         f"🚀 *COMPRA*\n\n"
-        f"Token: {symbol}\n"
-        f"Preço: ${price}\n"
+        f"{symbol}\n"
+        f"${price}\n"
         f"https://solscan.io/tx/{tx}"
     )
 
@@ -282,6 +269,10 @@ def buy_token(pair):
         daemon=True
     ).start()
 
+    time.sleep(2)
+
+    buy_lock = False
+
 
 # ================= SELL =================
 
@@ -290,15 +281,10 @@ def sell_token(trade):
     token = trade["token"]
     symbol = trade["symbol"]
 
-    balance = get_token_balance(token)
-
-    if balance <= 0:
-        return
-
     ok, tx = jupiter_swap(
         token,
         WSOL,
-        balance
+        CONFIG["trade_amount_sol"]
     )
 
     if not ok:
@@ -318,8 +304,8 @@ def sell_token(trade):
 
     alert(
         f"💰 *VENDA*\n\n"
-        f"Token: {symbol}\n"
-        f"Resultado: {round((pnl-1)*100,2)}%\n"
+        f"{symbol}\n"
+        f"{round((pnl-1)*100,2)}%\n"
         f"https://solscan.io/tx/{tx}"
     )
 
@@ -341,9 +327,6 @@ def monitor_trade(trade):
             time.sleep(4)
             continue
 
-        if price > trade["highest_price"]:
-            trade["highest_price"] = price
-
         if price >= trade["buy_price"] * CONFIG["take_profit"]:
             sell_token(trade)
             return
@@ -352,29 +335,11 @@ def monitor_trade(trade):
             sell_token(trade)
             return
 
-        if price >= trade["buy_price"] * CONFIG["trailing_start"]:
-
-            if price <= trade["highest_price"] * CONFIG["trailing_stop"]:
-                sell_token(trade)
-                return
-
         if time.time() - start > CONFIG["max_hold_minutes"] * 60:
             sell_token(trade)
             return
 
         time.sleep(4)
-
-
-# ================= BLACKLIST CLEAN =================
-
-def clean_blacklist():
-
-    now = time.time()
-
-    for token in list(blacklist.keys()):
-
-        if now - blacklist[token] > CONFIG["blacklist_time"]:
-            del blacklist[token]
 
 
 # ================= SCANNER =================
@@ -387,64 +352,27 @@ def scan_tokens():
 
             print("🔎 scanning...")
 
-            clean_blacklist()
-
             url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
 
             data = safe_get_json(url)
 
             if not data:
-                time.sleep(8)
+                time.sleep(6)
                 continue
 
             pairs = data.get("pairs", [])
 
-            for pair in pairs[:80]:
+            for pair in pairs[:60]:
 
-                token = pair["baseToken"]["address"]
+                if valid_pair(pair):
 
-                # não comprar SOL
-                if token == WSOL:
-                    continue
-
-                # não comprar stablecoins
-                if token in STABLES:
-                    continue
-
-                if token in blacklist:
-                    continue
-
-                if not valid_pair(pair):
-                    continue
-
-                blacklist[token] = time.time()
-
-                buy_token(pair)
+                    buy_token(pair)
 
         except Exception as e:
 
             print("scan error", e)
 
         time.sleep(CONFIG["scan_interval"])
-
-
-# ================= REPORT =================
-
-def report_loop():
-
-    while True:
-
-        time.sleep(7200)
-
-        msg = (
-            "📊 *RELATÓRIO BOT*\n\n"
-            f"Trades: {stats['trades']}\n"
-            f"Vitórias: {stats['wins']}\n"
-            f"Perdas: {stats['losses']}\n"
-            f"Trades ativos: {len(active_trades)}"
-        )
-
-        alert(msg)
 
 
 # ================= SERVER =================
@@ -468,7 +396,6 @@ if __name__ == "__main__":
 
     threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=scan_tokens, daemon=True).start()
-    threading.Thread(target=report_loop, daemon=True).start()
 
     while True:
         time.sleep(60)

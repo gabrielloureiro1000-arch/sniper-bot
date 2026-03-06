@@ -22,6 +22,11 @@ PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")
 
 WSOL = "So11111111111111111111111111111111111111112"
 
+STABLES = [
+"Es9vMFrzaCERmJfrxYgM4Zqz9j4kY1zJ6q8R2ZxJ9p",
+"EPjFWdd5AufqSSqeM2q9b8YvCk4Xk8i1i8m8YdB1x"
+]
+
 CONFIG = {
 
     "trade_amount_sol": 0.02,
@@ -99,7 +104,6 @@ def alert(msg):
         )
 
     except Exception as e:
-
         print("telegram error", e)
 
 
@@ -125,7 +129,6 @@ def get_token_balance(token):
         return amount / (10 ** decimals)
 
     except:
-
         return 0
 
 
@@ -195,7 +198,6 @@ def get_price(token):
         return float(pairs[0]["priceUsd"])
 
     except:
-
         return None
 
 
@@ -229,7 +231,6 @@ def valid_pair(pair):
         return True
 
     except:
-
         return False
 
 
@@ -337,7 +338,6 @@ def monitor_trade(trade):
         price = get_price(trade["token"])
 
         if not price:
-
             time.sleep(4)
             continue
 
@@ -355,12 +355,10 @@ def monitor_trade(trade):
         if price >= trade["buy_price"] * CONFIG["trailing_start"]:
 
             if price <= trade["highest_price"] * CONFIG["trailing_stop"]:
-
                 sell_token(trade)
                 return
 
         if time.time() - start > CONFIG["max_hold_minutes"] * 60:
-
             sell_token(trade)
             return
 
@@ -404,6 +402,14 @@ def scan_tokens():
             for pair in pairs[:80]:
 
                 token = pair["baseToken"]["address"]
+
+                # não comprar SOL
+                if token == WSOL:
+                    continue
+
+                # não comprar stablecoins
+                if token in STABLES:
+                    continue
 
                 if token in blacklist:
                     continue

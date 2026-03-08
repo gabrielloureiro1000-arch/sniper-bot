@@ -19,7 +19,8 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
 if not RPC_URL or not PRIVATE_KEY:
-    raise Exception("ENV variables missing")
+    raise Exception("Variáveis de ambiente faltando")
+
 
 # ================= INIT =================
 
@@ -32,24 +33,28 @@ wallet = Keypair.from_base58_string(PRIVATE_KEY)
 WSOL = "So11111111111111111111111111111111111111112"
 
 
+# ================= CONFIG =================
+
 CONFIG = {
 
     "BUY_AMOUNT": 0.02,
 
-    "MIN_LIQUIDITY": 800,
-    "MIN_VOLUME": 300,
+    "MIN_LIQUIDITY": 1000,
+    "MIN_VOLUME": 500,
 
-    "TAKE_PROFIT": 1.7,
+    "TAKE_PROFIT": 1.8,
     "STOP_LOSS": 0.65,
 
-    "SCAN_INTERVAL": 5,
+    "SCAN_INTERVAL": 6,
 
     "MAX_TRADES": 3
 }
 
 
 active_trades = []
+seen_tokens = set()
 blacklist = set()
+
 
 stats = {
 
@@ -121,10 +126,8 @@ def swap(input_mint, output_mint, sol_amount):
             return False
 
         payload = {
-
             "quoteResponse": quote,
             "userPublicKey": str(wallet.pubkey())
-
         }
 
         swap_tx = requests.post(
@@ -153,18 +156,33 @@ def swap(input_mint, output_mint, sol_amount):
 
 def buy(pair):
 
-    if len(active_trades) >= CONFIG["MAX_TRADES"]:
-        return
-
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
+
+    if token == WSOL:
+        return
 
     if token in blacklist:
         return
 
+    if token in seen_tokens:
+        return
+
+    if len(active_trades) >= CONFIG["MAX_TRADES"]:
+        return
+
+    liquidity = float(pair["liquidity"]["usd"])
+    volume = float(pair["volume"]["h24"])
+
+    if liquidity < CONFIG["MIN_LIQUIDITY"]:
+        return
+
+    if volume < CONFIG["MIN_VOLUME"]:
+        return
+
     price = float(pair["priceUsd"])
 
-    print("BUY", symbol)
+    print(f"🚀 BUY {symbol}")
 
     ok = swap(WSOL, token, CONFIG["BUY_AMOUNT"])
 
@@ -172,16 +190,16 @@ def buy(pair):
         return
 
     trade = {
-
         "token": token,
         "symbol": symbol,
         "buy_price": price,
         "time": time.time()
-
     }
 
     active_trades.append(trade)
+
     blacklist.add(token)
+    seen_tokens.add(token)
 
     stats["trades"] += 1
 
@@ -190,8 +208,10 @@ def buy(pair):
 
 Token: {symbol}
 Preço: ${price}
-""")
 
+Liquidez: ${liquidity}
+Volume: ${volume}
+""")
 
     threading.Thread(
         target=monitor,
@@ -244,17 +264,14 @@ def monitor(trade):
             continue
 
         if price >= trade["buy_price"] * CONFIG["TAKE_PROFIT"]:
-
             sell(trade)
             return
 
         if price <= trade["buy_price"] * CONFIG["STOP_LOSS"]:
-
             sell(trade)
             return
 
         if time.time() - start > 1800:
-
             sell(trade)
             return
 
@@ -279,18 +296,9 @@ def scanner():
 
         pairs = data["pairs"]
 
-        for pair in pairs[:60]:
+        for pair in pairs:
 
             try:
-
-                liquidity = float(pair["liquidity"]["usd"])
-                volume = float(pair["volume"]["h24"])
-
-                if liquidity < CONFIG["MIN_LIQUIDITY"]:
-                    continue
-
-                if volume < CONFIG["MIN_VOLUME"]:
-                    continue
 
                 buy(pair)
 
@@ -309,7 +317,7 @@ def report():
         time.sleep(7200)
 
         send(f"""
-📊 RELATÓRIO BOT
+📊 RELATÓRIO
 
 Trades: {stats["trades"]}
 Wins: {stats["wins"]}

@@ -2,11 +2,10 @@ import os
 import time
 import threading
 import requests
-import telebot
 import base64
+import telebot
 
 from flask import Flask
-
 from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
@@ -15,25 +14,12 @@ from solders.transaction import VersionedTransaction
 # ================= ENV =================
 
 RPC_URL = os.environ.get("RPC_URL")
-PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY")   # <-- mesmo nome do Render
+PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-
-# ================= VALIDATION =================
-
-if not RPC_URL:
-    raise Exception("RPC_URL não configurado")
-
-if not PRIVATE_KEY:
-    raise Exception("WALLET_PRIVATE_KEY não configurado")
-
-if not TELEGRAM_TOKEN:
-    raise Exception("TELEGRAM_TOKEN não configurado")
-
-if not CHAT_ID:
-    raise Exception("CHAT_ID não configurado")
-
+if not RPC_URL or not PRIVATE_KEY:
+    raise Exception("ENV variables missing")
 
 # ================= INIT =================
 
@@ -48,22 +34,25 @@ WSOL = "So11111111111111111111111111111111111111112"
 
 CONFIG = {
 
-    "buy_amount": 0.02,
-    "min_liquidity": 500,
-    "min_volume": 200,
+    "BUY_AMOUNT": 0.02,
 
-    "take_profit": 1.7,
-    "stop_loss": 0.65,
+    "MIN_LIQUIDITY": 800,
+    "MIN_VOLUME": 300,
 
-    "scan_interval": 5,
+    "TAKE_PROFIT": 1.7,
+    "STOP_LOSS": 0.65,
 
-    "max_trades": 3
+    "SCAN_INTERVAL": 5,
+
+    "MAX_TRADES": 3
 }
 
 
 active_trades = []
+blacklist = set()
 
 stats = {
+
     "trades": 0,
     "wins": 0,
     "losses": 0
@@ -80,7 +69,7 @@ def send(msg):
         pass
 
 
-# ================= REQUEST =================
+# ================= HTTP =================
 
 def safe_get(url):
 
@@ -132,8 +121,10 @@ def swap(input_mint, output_mint, sol_amount):
             return False
 
         payload = {
+
             "quoteResponse": quote,
             "userPublicKey": str(wallet.pubkey())
+
         }
 
         swap_tx = requests.post(
@@ -162,28 +153,35 @@ def swap(input_mint, output_mint, sol_amount):
 
 def buy(pair):
 
-    if len(active_trades) >= CONFIG["max_trades"]:
+    if len(active_trades) >= CONFIG["MAX_TRADES"]:
         return
 
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
 
+    if token in blacklist:
+        return
+
     price = float(pair["priceUsd"])
 
-    print("🚀 BUY", symbol)
+    print("BUY", symbol)
 
-    ok = swap(WSOL, token, CONFIG["buy_amount"])
+    ok = swap(WSOL, token, CONFIG["BUY_AMOUNT"])
 
     if not ok:
         return
 
     trade = {
+
         "token": token,
         "symbol": symbol,
-        "buy_price": price
+        "buy_price": price,
+        "time": time.time()
+
     }
 
     active_trades.append(trade)
+    blacklist.add(token)
 
     stats["trades"] += 1
 
@@ -211,7 +209,7 @@ def sell(trade):
 
     price = get_price(token)
 
-    swap(token, WSOL, CONFIG["buy_amount"])
+    swap(token, WSOL, CONFIG["BUY_AMOUNT"])
 
     pnl = price / trade["buy_price"]
 
@@ -235,6 +233,8 @@ Resultado: {round((pnl-1)*100,2)}%
 
 def monitor(trade):
 
+    start = time.time()
+
     while True:
 
         price = get_price(trade["token"])
@@ -243,20 +243,27 @@ def monitor(trade):
             time.sleep(5)
             continue
 
-        if price >= trade["buy_price"] * CONFIG["take_profit"]:
+        if price >= trade["buy_price"] * CONFIG["TAKE_PROFIT"]:
+
             sell(trade)
             return
 
-        if price <= trade["buy_price"] * CONFIG["stop_loss"]:
+        if price <= trade["buy_price"] * CONFIG["STOP_LOSS"]:
+
+            sell(trade)
+            return
+
+        if time.time() - start > 1800:
+
             sell(trade)
             return
 
         time.sleep(5)
 
 
-# ================= SCAN =================
+# ================= SCANNER =================
 
-def scan():
+def scanner():
 
     while True:
 
@@ -267,22 +274,22 @@ def scan():
         data = safe_get(url)
 
         if not data:
-            time.sleep(CONFIG["scan_interval"])
+            time.sleep(CONFIG["SCAN_INTERVAL"])
             continue
 
         pairs = data["pairs"]
 
-        for pair in pairs[:40]:
+        for pair in pairs[:60]:
 
             try:
 
                 liquidity = float(pair["liquidity"]["usd"])
                 volume = float(pair["volume"]["h24"])
 
-                if liquidity < CONFIG["min_liquidity"]:
+                if liquidity < CONFIG["MIN_LIQUIDITY"]:
                     continue
 
-                if volume < CONFIG["min_volume"]:
+                if volume < CONFIG["MIN_VOLUME"]:
                     continue
 
                 buy(pair)
@@ -290,7 +297,7 @@ def scan():
             except:
                 pass
 
-        time.sleep(CONFIG["scan_interval"])
+        time.sleep(CONFIG["SCAN_INTERVAL"])
 
 
 # ================= REPORT =================
@@ -302,7 +309,7 @@ def report():
         time.sleep(7200)
 
         send(f"""
-📊 RELATÓRIO
+📊 RELATÓRIO BOT
 
 Trades: {stats["trades"]}
 Wins: {stats["wins"]}
@@ -325,9 +332,9 @@ def home():
 
 if __name__ == "__main__":
 
-    send("🤖 BOT MEMECOIN ONLINE")
+    send("🤖 SNIPER MEMECOIN INICIADO")
 
-    threading.Thread(target=scan).start()
+    threading.Thread(target=scanner).start()
     threading.Thread(target=report).start()
 
     app.run(host="0.0.0.0", port=10000)

@@ -1,281 +1,156 @@
 import os
 import time
-import threading
-import requests
+import asyncio
 import base64
+import requests
 import telebot
 
 from flask import Flask
+from solana.rpc.websocket_api import connect
 from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
 
-# ================= ENV =================
-
-RPC_URL = os.getenv("RPC_URL")
+RPC = os.getenv("RPC_URL")
 PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-if not RPC_URL or not PRIVATE_KEY:
-    raise Exception("ENV variables missing")
-
-
-# ================= INIT =================
-
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
-client = Client(RPC_URL)
-
-wallet = Keypair.from_base58_string(PRIVATE_KEY)
+TELEGRAM = os.getenv("TELEGRAM_TOKEN")
+CHAT = os.getenv("CHAT_ID")
 
 WSOL = "So11111111111111111111111111111111111111112"
 
+bot = telebot.TeleBot(TELEGRAM)
 
-# ================= CONFIG =================
+client = Client(RPC)
 
-CONFIG = {
+wallet = Keypair.from_base58_string(PRIVATE_KEY)
 
-    "BUY_AMOUNT": 0.02,
+BUY_AMOUNT = 0.02
 
-    "MIN_LIQUIDITY": 2000,
-    "MIN_VOLUME": 800,
+TAKE_PROFIT = 2.0
+STOP_LOSS = 0.6
 
-    "TAKE_PROFIT": 1.8,
-    "STOP_LOSS": 0.65,
+MIN_LIQ = 3000
 
-    "SCAN_INTERVAL": 12,
+active = []
+seen = set()
 
-    "MAX_TRADES": 2
-}
-
-
-active_trades = []
-seen_tokens = set()
-
-
-stats = {
-    "trades": 0,
-    "wins": 0,
-    "losses": 0
-}
-
-
-# ================= TELEGRAM =================
 
 def send(msg):
-
     try:
-        bot.send_message(CHAT_ID, msg)
+        bot.send_message(CHAT, msg)
     except:
         pass
 
 
-# ================= HTTP =================
-
-def safe_get(url):
-
-    try:
-        r = requests.get(url, timeout=10)
-
-        if r.status_code != 200:
-            return None
-
-        return r.json()
-
-    except:
-        return None
-
-
-# ================= PRICE =================
-
-def get_price(token):
+def price(token):
 
     url = f"https://api.dexscreener.com/latest/dex/tokens/{token}"
 
-    data = safe_get(url)
+    r = requests.get(url)
 
-    if not data:
+    if r.status_code != 200:
         return None
 
-    pairs = data.get("pairs", [])
+    data = r.json()
 
-    if not pairs:
+    if not data["pairs"]:
         return None
 
-    return float(pairs[0]["priceUsd"])
+    return float(data["pairs"][0]["priceUsd"])
 
 
-# ================= SWAP =================
+def swap(input_mint, output_mint, amount):
 
-def swap(input_mint, output_mint, sol_amount):
+    lamports = int(amount * 1e9)
 
-    try:
+    q = requests.get(
+        f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={lamports}&slippageBps=1500"
+    ).json()
 
-        lamports = int(sol_amount * 1e9)
-
-        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={lamports}&slippageBps=2000"
-
-        quote = safe_get(quote_url)
-
-        if not quote:
-            return False
-
-        payload = {
-            "quoteResponse": quote,
-            "userPublicKey": str(wallet.pubkey())
-        }
-
-        swap_tx = requests.post(
-            "https://quote-api.jup.ag/v6/swap",
-            json=payload
-        ).json()
-
-        tx = VersionedTransaction.from_bytes(
-            base64.b64decode(swap_tx["swapTransaction"])
-        )
-
-        signed = VersionedTransaction(tx.message, [wallet])
-
-        client.send_raw_transaction(bytes(signed))
-
-        return True
-
-    except Exception as e:
-
-        print("swap error:", e)
-
+    if not q:
         return False
 
+    payload = {
+        "quoteResponse": q,
+        "userPublicKey": str(wallet.pubkey())
+    }
 
-# ================= BUY =================
+    swap_tx = requests.post(
+        "https://quote-api.jup.ag/v6/swap",
+        json=payload
+    ).json()
 
-def buy(pair):
+    tx = VersionedTransaction.from_bytes(
+        base64.b64decode(swap_tx["swapTransaction"])
+    )
 
-    base = pair["baseToken"]
-    quote = pair["quoteToken"]
+    signed = VersionedTransaction(tx.message, [wallet])
 
-    base_address = base["address"]
-    base_symbol = base["symbol"]
+    client.send_raw_transaction(bytes(signed))
 
-    quote_address = quote["address"]
+    return True
 
-    # BLOQUEIOS CRÍTICOS
-    if base_address == WSOL:
+
+def buy(token):
+
+    if token in seen:
         return
 
-    if base_symbol.upper() == "SOL":
+    seen.add(token)
+
+    p = price(token)
+
+    if not p:
         return
 
-    if quote_address != WSOL:
-        return
-
-    if base_address in seen_tokens:
-        return
-
-    if len(active_trades) >= CONFIG["MAX_TRADES"]:
-        return
-
-    liquidity = float(pair["liquidity"]["usd"])
-    volume = float(pair["volume"]["h24"])
-
-    if liquidity < CONFIG["MIN_LIQUIDITY"]:
-        return
-
-    if volume < CONFIG["MIN_VOLUME"]:
-        return
-
-    price = float(pair["priceUsd"])
-
-    print(f"🚀 BUY {base_symbol}")
-
-    ok = swap(WSOL, base_address, CONFIG["BUY_AMOUNT"])
+    ok = swap(WSOL, token, BUY_AMOUNT)
 
     if not ok:
         return
 
     trade = {
-
-        "token": base_address,
-        "symbol": base_symbol,
-        "buy_price": price,
-        "time": time.time()
-
+        "token": token,
+        "buy": p
     }
 
-    active_trades.append(trade)
+    active.append(trade)
 
-    seen_tokens.add(base_address)
+    send(f"🚀 BUY {token}\nprice ${p}")
 
-    stats["trades"] += 1
+    asyncio.create_task(monitor(trade))
 
-    send(f"""
-🚀 COMPRA
-
-Token: {base_symbol}
-Preço: ${price}
-
-Liquidez: ${liquidity}
-Volume: ${volume}
-""")
-
-
-    threading.Thread(
-        target=monitor,
-        args=(trade,),
-        daemon=True
-    ).start()
-
-
-# ================= SELL =================
 
 def sell(trade):
 
-    token = trade["token"]
-    symbol = trade["symbol"]
+    p = price(trade["token"])
 
-    price = get_price(token)
+    swap(trade["token"], WSOL, BUY_AMOUNT)
 
-    swap(token, WSOL, CONFIG["BUY_AMOUNT"])
+    pnl = p / trade["buy"]
 
-    pnl = price / trade["buy_price"]
+    send(f"💰 SELL {trade['token']} {round((pnl-1)*100,2)}%")
 
-    if pnl >= 1:
-        stats["wins"] += 1
-    else:
-        stats["losses"] += 1
-
-    send(f"""
-💰 VENDA
-
-Token: {symbol}
-
-Resultado: {round((pnl-1)*100,2)}%
-""")
-
-    active_trades.remove(trade)
+    active.remove(trade)
 
 
-# ================= MONITOR =================
-
-def monitor(trade):
+async def monitor(trade):
 
     start = time.time()
 
     while True:
 
-        price = get_price(trade["token"])
+        p = price(trade["token"])
 
-        if not price:
-            time.sleep(6)
+        if not p:
+            await asyncio.sleep(5)
             continue
 
-        if price >= trade["buy_price"] * CONFIG["TAKE_PROFIT"]:
+        if p >= trade["buy"] * TAKE_PROFIT:
             sell(trade)
             return
 
-        if price <= trade["buy_price"] * CONFIG["STOP_LOSS"]:
+        if p <= trade["buy"] * STOP_LOSS:
             sell(trade)
             return
 
@@ -283,38 +158,27 @@ def monitor(trade):
             sell(trade)
             return
 
-        time.sleep(6)
+        await asyncio.sleep(5)
 
 
-# ================= SCANNER =================
+async def raydium_listener():
 
-def scanner():
+    async with connect(RPC) as ws:
 
-    while True:
+        await ws.logs_subscribe()
 
-        print("🔎 scanning...")
+        while True:
 
-        url = "https://api.dexscreener.com/latest/dex/pairs/solana"
+            msg = await ws.recv()
 
-        data = safe_get(url)
+            logs = str(msg)
 
-        if not data:
-            time.sleep(CONFIG["SCAN_INTERVAL"])
-            continue
+            if "initialize2" in logs:
 
-        pairs = data["pairs"]
+                token = logs.split("mint")[1][:44]
 
-        for pair in pairs[:40]:
+                buy(token)
 
-            try:
-                buy(pair)
-            except:
-                pass
-
-        time.sleep(CONFIG["SCAN_INTERVAL"])
-
-
-# ================= REPORT =================
 
 def report():
 
@@ -323,32 +187,40 @@ def report():
         time.sleep(7200)
 
         send(f"""
-📊 RELATÓRIO BOT
+📊 REPORT
 
-Trades: {stats["trades"]}
-Wins: {stats["wins"]}
-Losses: {stats["losses"]}
-
-Ativos: {len(active_trades)}
+Active trades: {len(active)}
+Tokens seen: {len(seen)}
 """)
 
 
-# ================= SERVER =================
-
 app = Flask(__name__)
+
 
 @app.route("/")
 def home():
-    return "bot running"
+    return "sniper running"
 
 
-# ================= START =================
+def start():
+
+    send("🤖 PROFESSIONAL SNIPER ONLINE")
+
+    loop = asyncio.new_event_loop()
+
+    asyncio.set_event_loop(loop)
+
+    loop.create_task(raydium_listener())
+
+    loop.run_forever()
+
 
 if __name__ == "__main__":
 
-    send("🤖 SNIPER MEMECOIN ONLINE")
+    import threading
 
-    threading.Thread(target=scanner).start()
+    threading.Thread(target=start).start()
+
     threading.Thread(target=report).start()
 
     app.run(host="0.0.0.0", port=10000)

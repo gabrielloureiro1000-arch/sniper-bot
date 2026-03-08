@@ -4,77 +4,69 @@ import threading
 import requests
 import base64
 
-import telebot
+from flask import Flask
 
 from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-from flask import Flask
-
-# ================= CONFIG =================
-
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+# =========================
+# CONFIG
+# =========================
 
 RPC_URL = os.getenv("RPC_URL")
-PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 
 WSOL = "So11111111111111111111111111111111111111112"
 
-BLOCKED_SYMBOLS = [
-"SOL",
-"USDC",
-"USDT"
-]
-
 CONFIG = {
 
+    # valor por trade
     "trade_amount_sol": 0.02,
 
-    "min_liquidity_usd": 800,
-    "min_volume_usd": 200,
+    # filtros agressivos
+    "min_liquidity_usd": 200,
+    "min_volume_usd": 40,
 
-    "take_profit": 1.30,
-    "stop_loss": 0.75,
+    # venda
+    "take_profit": 1.50,
+    "stop_loss": 0.70,
 
-    "max_hold_minutes": 6,
+    # tempo máximo segurando
+    "max_hold_minutes": 10,
 
+    # intervalo scanner
     "scan_interval": 5,
 
-    "max_active_trades": 2,
+    # limite de trades simultâneos
+    "max_active_trades": 3,
 
+    # slippage
     "slippage_bps": 1800,
 
     "priority_fee": 1500000
-
 }
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-# ================= INIT =================
-
-bot = telebot.TeleBot(TOKEN)
+# =========================
+# INIT
+# =========================
 
 solana_client = Client(RPC_URL)
 
 wallet = Keypair.from_base58_string(PRIVATE_KEY)
 
-blacklist = set()
-
 active_trades = []
+blacklist = set()
 
 buy_lock = False
 
-stats = {
-    "wins": 0,
-    "losses": 0,
-    "trades": 0
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# ================= REQUEST =================
+# =========================
+# SAFE REQUEST
+# =========================
 
-def safe_get_json(url):
+def safe_get(url):
 
     try:
 
@@ -89,50 +81,32 @@ def safe_get_json(url):
         return None
 
 
-# ================= TELEGRAM =================
-
-def alert(msg):
-
-    try:
-
-        bot.send_message(
-            CHAT_ID,
-            msg,
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-
-    except:
-        pass
-
-
-# ================= PRICE =================
+# =========================
+# PRICE
+# =========================
 
 def get_price(token):
 
-    try:
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{token}"
 
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{token}"
+    data = safe_get(url)
 
-        data = safe_get_json(url)
-
-        if not data:
-            return None
-
-        pairs = data.get("pairs", [])
-
-        if not pairs:
-            return None
-
-        return float(pairs[0]["priceUsd"])
-
-    except:
+    if not data:
         return None
 
+    pairs = data.get("pairs", [])
 
-# ================= JUPITER =================
+    if not pairs:
+        return None
 
-def jupiter_swap(input_mint, output_mint, amount):
+    return float(pairs[0]["priceUsd"])
+
+
+# =========================
+# JUPITER SWAP
+# =========================
+
+def swap(input_mint, output_mint, amount):
 
     try:
 
@@ -140,7 +114,7 @@ def jupiter_swap(input_mint, output_mint, amount):
 
         quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint}&outputMint={output_mint}&amount={lamports}&slippageBps={CONFIG['slippage_bps']}"
 
-        quote = safe_get_json(quote_url)
+        quote = safe_get(quote_url)
 
         if not quote:
             return False, None
@@ -151,15 +125,13 @@ def jupiter_swap(input_mint, output_mint, amount):
             "prioritizationFeeLamports": CONFIG["priority_fee"]
         }
 
-        swap = requests.post(
+        swap_tx = requests.post(
             "https://quote-api.jup.ag/v6/swap",
-            json=payload,
-            headers=HEADERS,
-            timeout=10
+            json=payload
         ).json()
 
         tx = VersionedTransaction.from_bytes(
-            base64.b64decode(swap["swapTransaction"])
+            base64.b64decode(swap_tx["swapTransaction"])
         )
 
         signed = VersionedTransaction(tx.message, [wallet])
@@ -175,7 +147,9 @@ def jupiter_swap(input_mint, output_mint, amount):
         return False, None
 
 
-# ================= FILTER =================
+# =========================
+# VALID PAIR
+# =========================
 
 def valid_pair(pair):
 
@@ -187,7 +161,7 @@ def valid_pair(pair):
         if token == WSOL:
             return False
 
-        if symbol in BLOCKED_SYMBOLS:
+        if token in blacklist:
             return False
 
         liquidity = float(pair.get("liquidity", {}).get("usd", 0))
@@ -209,9 +183,11 @@ def valid_pair(pair):
         return False
 
 
-# ================= BUY =================
+# =========================
+# BUY
+# =========================
 
-def buy_token(pair):
+def buy(pair):
 
     global buy_lock
 
@@ -224,18 +200,11 @@ def buy_token(pair):
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
 
-    if token in blacklist:
-        return
-
     buy_lock = True
 
     print("🚀 BUY", symbol)
 
-    ok, tx = jupiter_swap(
-        WSOL,
-        token,
-        CONFIG["trade_amount_sol"]
-    )
+    ok, tx = swap(WSOL, token, CONFIG["trade_amount_sol"])
 
     if not ok:
         buy_lock = False
@@ -247,21 +216,12 @@ def buy_token(pair):
         "token": token,
         "symbol": symbol,
         "buy_price": price,
-        "buy_time": time.time()
+        "time": time.time()
     }
 
     active_trades.append(trade)
 
     blacklist.add(token)
-
-    stats["trades"] += 1
-
-    alert(
-        f"🚀 *COMPRA*\n\n"
-        f"{symbol}\n"
-        f"${price}\n"
-        f"https://solscan.io/tx/{tx}"
-    )
 
     threading.Thread(
         target=monitor_trade,
@@ -274,46 +234,26 @@ def buy_token(pair):
     buy_lock = False
 
 
-# ================= SELL =================
+# =========================
+# SELL
+# =========================
 
-def sell_token(trade):
+def sell(trade):
 
     token = trade["token"]
     symbol = trade["symbol"]
 
-    ok, tx = jupiter_swap(
-        token,
-        WSOL,
-        CONFIG["trade_amount_sol"]
-    )
+    print("💰 SELL", symbol)
 
-    if not ok:
-        return
-
-    price = get_price(token)
-
-    if not price:
-        return
-
-    pnl = price / trade["buy_price"]
-
-    if pnl >= 1:
-        stats["wins"] += 1
-    else:
-        stats["losses"] += 1
-
-    alert(
-        f"💰 *VENDA*\n\n"
-        f"{symbol}\n"
-        f"{round((pnl-1)*100,2)}%\n"
-        f"https://solscan.io/tx/{tx}"
-    )
+    swap(token, WSOL, CONFIG["trade_amount_sol"])
 
     if trade in active_trades:
         active_trades.remove(trade)
 
 
-# ================= MONITOR =================
+# =========================
+# MONITOR TRADE
+# =========================
 
 def monitor_trade(trade):
 
@@ -328,23 +268,25 @@ def monitor_trade(trade):
             continue
 
         if price >= trade["buy_price"] * CONFIG["take_profit"]:
-            sell_token(trade)
+            sell(trade)
             return
 
         if price <= trade["buy_price"] * CONFIG["stop_loss"]:
-            sell_token(trade)
+            sell(trade)
             return
 
         if time.time() - start > CONFIG["max_hold_minutes"] * 60:
-            sell_token(trade)
+            sell(trade)
             return
 
         time.sleep(4)
 
 
-# ================= SCANNER =================
+# =========================
+# SCANNER
+# =========================
 
-def scan_tokens():
+def scan():
 
     while True:
 
@@ -354,19 +296,19 @@ def scan_tokens():
 
             url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
 
-            data = safe_get_json(url)
+            data = safe_get(url)
 
             if not data:
-                time.sleep(6)
+                time.sleep(5)
                 continue
 
             pairs = data.get("pairs", [])
 
-            for pair in pairs[:60]:
+            for pair in pairs[:50]:
 
                 if valid_pair(pair):
 
-                    buy_token(pair)
+                    buy(pair)
 
         except Exception as e:
 
@@ -375,27 +317,31 @@ def scan_tokens():
         time.sleep(CONFIG["scan_interval"])
 
 
-# ================= SERVER =================
+# =========================
+# SERVER (KEEP ALIVE)
+# =========================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot running"
+    return "bot running"
 
 
 def run_server():
     app.run(host="0.0.0.0", port=10000)
 
 
-# ================= START =================
+# =========================
+# START
+# =========================
 
 if __name__ == "__main__":
 
-    alert("🐙 SNIPER BOT INICIADO")
+    print("🚀 MEMECOIN BOT STARTED")
 
     threading.Thread(target=run_server, daemon=True).start()
-    threading.Thread(target=scan_tokens, daemon=True).start()
+    threading.Thread(target=scan, daemon=True).start()
 
     while True:
         time.sleep(60)

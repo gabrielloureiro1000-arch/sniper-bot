@@ -4,52 +4,49 @@ import threading
 import requests
 import base64
 
+import telebot
+
 from flask import Flask
 
 from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-# =========================
-# CONFIG
-# =========================
+
+# ================= CONFIG =================
 
 RPC_URL = os.getenv("RPC_URL")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 WSOL = "So11111111111111111111111111111111111111112"
 
 CONFIG = {
 
-    # valor por trade
     "trade_amount_sol": 0.02,
 
-    # filtros agressivos
-    "min_liquidity_usd": 200,
-    "min_volume_usd": 40,
+    "min_liquidity_usd": 500,
+    "min_volume_usd": 200,
 
-    # venda
-    "take_profit": 1.50,
+    "take_profit": 1.60,
     "stop_loss": 0.70,
 
-    # tempo máximo segurando
-    "max_hold_minutes": 10,
+    "max_hold_minutes": 15,
 
-    # intervalo scanner
     "scan_interval": 5,
 
-    # limite de trades simultâneos
     "max_active_trades": 3,
 
-    # slippage
     "slippage_bps": 1800,
 
     "priority_fee": 1500000
 }
 
-# =========================
-# INIT
-# =========================
+# ================= INIT =================
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 solana_client = Client(RPC_URL)
 
@@ -58,13 +55,25 @@ wallet = Keypair.from_base58_string(PRIVATE_KEY)
 active_trades = []
 blacklist = set()
 
-buy_lock = False
+stats = {
+    "trades": 0,
+    "wins": 0,
+    "losses": 0
+}
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# =========================
-# SAFE REQUEST
-# =========================
+# ================= TELEGRAM =================
+
+def send(msg):
+
+    try:
+        bot.send_message(CHAT_ID, msg)
+    except:
+        pass
+
+
+# ================= REQUEST =================
 
 def safe_get(url):
 
@@ -81,9 +90,7 @@ def safe_get(url):
         return None
 
 
-# =========================
-# PRICE
-# =========================
+# ================= PRICE =================
 
 def get_price(token):
 
@@ -102,9 +109,7 @@ def get_price(token):
     return float(pairs[0]["priceUsd"])
 
 
-# =========================
-# JUPITER SWAP
-# =========================
+# ================= SWAP =================
 
 def swap(input_mint, output_mint, amount):
 
@@ -117,7 +122,7 @@ def swap(input_mint, output_mint, amount):
         quote = safe_get(quote_url)
 
         if not quote:
-            return False, None
+            return False
 
         payload = {
             "quoteResponse": quote,
@@ -136,27 +141,22 @@ def swap(input_mint, output_mint, amount):
 
         signed = VersionedTransaction(tx.message, [wallet])
 
-        sig = solana_client.send_raw_transaction(bytes(signed))
+        solana_client.send_raw_transaction(bytes(signed))
 
-        return True, str(sig.value)
+        return True
 
-    except Exception as e:
+    except:
 
-        print("swap error", e)
-
-        return False, None
+        return False
 
 
-# =========================
-# VALID PAIR
-# =========================
+# ================= FILTER =================
 
 def valid_pair(pair):
 
     try:
 
         token = pair["baseToken"]["address"]
-        symbol = pair["baseToken"]["symbol"]
 
         if token == WSOL:
             return False
@@ -164,9 +164,8 @@ def valid_pair(pair):
         if token in blacklist:
             return False
 
-        liquidity = float(pair.get("liquidity", {}).get("usd", 0))
-        volume = float(pair.get("volume", {}).get("h24", 0))
-        price = float(pair.get("priceUsd", 0))
+        liquidity = float(pair["liquidity"]["usd"])
+        volume = float(pair["volume"]["h24"])
 
         if liquidity < CONFIG["min_liquidity_usd"]:
             return False
@@ -174,40 +173,25 @@ def valid_pair(pair):
         if volume < CONFIG["min_volume_usd"]:
             return False
 
-        if price <= 0:
-            return False
-
         return True
 
     except:
+
         return False
 
 
-# =========================
-# BUY
-# =========================
+# ================= BUY =================
 
 def buy(pair):
-
-    global buy_lock
-
-    if buy_lock:
-        return
-
-    if len(active_trades) >= CONFIG["max_active_trades"]:
-        return
 
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
 
-    buy_lock = True
-
     print("🚀 BUY", symbol)
 
-    ok, tx = swap(WSOL, token, CONFIG["trade_amount_sol"])
+    ok = swap(WSOL, token, CONFIG["trade_amount_sol"])
 
     if not ok:
-        buy_lock = False
         return
 
     price = float(pair["priceUsd"])
@@ -223,39 +207,56 @@ def buy(pair):
 
     blacklist.add(token)
 
+    stats["trades"] += 1
+
+    send(f"""
+🚀 COMPRA
+
+Token: {symbol}
+Preço: ${price}
+Liquidez: ${pair["liquidity"]["usd"]}
+""")
+
+
     threading.Thread(
-        target=monitor_trade,
+        target=monitor,
         args=(trade,),
         daemon=True
     ).start()
 
-    time.sleep(2)
 
-    buy_lock = False
-
-
-# =========================
-# SELL
-# =========================
+# ================= SELL =================
 
 def sell(trade):
 
     token = trade["token"]
     symbol = trade["symbol"]
 
-    print("💰 SELL", symbol)
+    price = get_price(token)
 
     swap(token, WSOL, CONFIG["trade_amount_sol"])
 
-    if trade in active_trades:
-        active_trades.remove(trade)
+    pnl = price / trade["buy_price"]
+
+    if pnl >= 1:
+        stats["wins"] += 1
+    else:
+        stats["losses"] += 1
+
+    send(f"""
+💰 VENDA
+
+Token: {symbol}
+
+Resultado: {round((pnl-1)*100,2)}%
+""")
+
+    active_trades.remove(trade)
 
 
-# =========================
-# MONITOR TRADE
-# =========================
+# ================= MONITOR =================
 
-def monitor_trade(trade):
+def monitor(trade):
 
     start = time.time()
 
@@ -264,7 +265,7 @@ def monitor_trade(trade):
         price = get_price(trade["token"])
 
         if not price:
-            time.sleep(4)
+            time.sleep(5)
             continue
 
         if price >= trade["buy_price"] * CONFIG["take_profit"]:
@@ -279,12 +280,29 @@ def monitor_trade(trade):
             sell(trade)
             return
 
-        time.sleep(4)
+        time.sleep(5)
 
 
-# =========================
-# SCANNER
-# =========================
+# ================= REPORT =================
+
+def report():
+
+    while True:
+
+        time.sleep(7200)
+
+        send(f"""
+📊 RELATÓRIO BOT
+
+Trades: {stats["trades"]}
+Wins: {stats["wins"]}
+Losses: {stats["losses"]}
+
+Trades ativos: {len(active_trades)}
+""")
+
+
+# ================= SCAN =================
 
 def scan():
 
@@ -302,13 +320,14 @@ def scan():
                 time.sleep(5)
                 continue
 
-            pairs = data.get("pairs", [])
+            pairs = data["pairs"]
 
             for pair in pairs[:50]:
 
                 if valid_pair(pair):
 
-                    buy(pair)
+                    if len(active_trades) < CONFIG["max_active_trades"]:
+                        buy(pair)
 
         except Exception as e:
 
@@ -317,9 +336,7 @@ def scan():
         time.sleep(CONFIG["scan_interval"])
 
 
-# =========================
-# SERVER (KEEP ALIVE)
-# =========================
+# ================= SERVER =================
 
 app = Flask(__name__)
 
@@ -328,20 +345,13 @@ def home():
     return "bot running"
 
 
-def run_server():
-    app.run(host="0.0.0.0", port=10000)
-
-
-# =========================
-# START
-# =========================
+# ================= START =================
 
 if __name__ == "__main__":
 
-    print("🚀 MEMECOIN BOT STARTED")
+    send("🤖 BOT MEMECOIN INICIADO")
 
-    threading.Thread(target=run_server, daemon=True).start()
-    threading.Thread(target=scan, daemon=True).start()
+    threading.Thread(target=scan).start()
+    threading.Thread(target=report).start()
 
-    while True:
-        time.sleep(60)
+    app.run(host="0.0.0.0", port=10000)

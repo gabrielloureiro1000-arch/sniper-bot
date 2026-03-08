@@ -3,7 +3,6 @@ import time
 import threading
 import requests
 import base64
-
 import telebot
 
 from flask import Flask
@@ -27,22 +26,23 @@ CONFIG = {
 
     "trade_amount_sol": 0.02,
 
-    "min_liquidity_usd": 500,
-    "min_volume_usd": 200,
+    "min_liquidity_usd": 300,
+    "min_volume_usd": 100,
 
-    "take_profit": 1.60,
-    "stop_loss": 0.70,
+    "take_profit": 1.6,
+    "stop_loss": 0.7,
 
-    "max_hold_minutes": 15,
+    "max_hold_minutes": 20,
 
     "scan_interval": 5,
 
     "max_active_trades": 3,
 
-    "slippage_bps": 1800,
+    "slippage_bps": 2000,
 
     "priority_fee": 1500000
 }
+
 
 # ================= INIT =================
 
@@ -53,6 +53,7 @@ solana_client = Client(RPC_URL)
 wallet = Keypair.from_base58_string(PRIVATE_KEY)
 
 active_trades = []
+
 blacklist = set()
 
 stats = {
@@ -62,6 +63,7 @@ stats = {
 }
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+
 
 # ================= TELEGRAM =================
 
@@ -145,7 +147,9 @@ def swap(input_mint, output_mint, amount):
 
         return True
 
-    except:
+    except Exception as e:
+
+        print("swap error", e)
 
         return False
 
@@ -176,13 +180,15 @@ def valid_pair(pair):
         return True
 
     except:
-
         return False
 
 
 # ================= BUY =================
 
 def buy(pair):
+
+    if len(active_trades) >= CONFIG["max_active_trades"]:
+        return
 
     token = pair["baseToken"]["address"]
     symbol = pair["baseToken"]["symbol"]
@@ -209,14 +215,14 @@ def buy(pair):
 
     stats["trades"] += 1
 
-    send(f"""
-🚀 COMPRA
+    send(
+f"""🚀 COMPRA
 
 Token: {symbol}
 Preço: ${price}
 Liquidez: ${pair["liquidity"]["usd"]}
-""")
-
+"""
+)
 
     threading.Thread(
         target=monitor,
@@ -243,13 +249,14 @@ def sell(trade):
     else:
         stats["losses"] += 1
 
-    send(f"""
-💰 VENDA
+    send(
+f"""💰 VENDA
 
 Token: {symbol}
 
 Resultado: {round((pnl-1)*100,2)}%
-""")
+"""
+)
 
     active_trades.remove(trade)
 
@@ -291,15 +298,16 @@ def report():
 
         time.sleep(7200)
 
-        send(f"""
-📊 RELATÓRIO BOT
+        send(
+f"""📊 RELATÓRIO BOT
 
 Trades: {stats["trades"]}
 Wins: {stats["wins"]}
 Losses: {stats["losses"]}
 
 Trades ativos: {len(active_trades)}
-""")
+"""
+)
 
 
 # ================= SCAN =================
@@ -322,12 +330,11 @@ def scan():
 
             pairs = data["pairs"]
 
-            for pair in pairs[:50]:
+            for pair in pairs[:60]:
 
                 if valid_pair(pair):
 
-                    if len(active_trades) < CONFIG["max_active_trades"]:
-                        buy(pair)
+                    buy(pair)
 
         except Exception as e:
 

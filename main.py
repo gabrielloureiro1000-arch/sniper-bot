@@ -45,7 +45,7 @@ CONFIG = {
     "TAKE_PROFIT": 1.8,
     "STOP_LOSS": 0.65,
 
-    "SCAN_INTERVAL": 10,
+    "SCAN_INTERVAL": 12,
 
     "MAX_TRADES": 2
 }
@@ -77,7 +77,6 @@ def send(msg):
 def safe_get(url):
 
     try:
-
         r = requests.get(url, timeout=10)
 
         if r.status_code != 200:
@@ -154,22 +153,25 @@ def swap(input_mint, output_mint, sol_amount):
 
 def buy(pair):
 
-    base = pair["baseToken"]["address"]
-    quote = pair["quoteToken"]["address"]
+    base = pair["baseToken"]
+    quote = pair["quoteToken"]
 
-    symbol = pair["baseToken"]["symbol"]
+    base_address = base["address"]
+    base_symbol = base["symbol"]
 
-    # PROTEÇÕES CRÍTICAS
-    if base == WSOL:
+    quote_address = quote["address"]
+
+    # BLOQUEIOS CRÍTICOS
+    if base_address == WSOL:
         return
 
-    if symbol.upper() == "SOL":
+    if base_symbol.upper() == "SOL":
         return
 
-    if quote != WSOL:
+    if quote_address != WSOL:
         return
 
-    if base in seen_tokens:
+    if base_address in seen_tokens:
         return
 
     if len(active_trades) >= CONFIG["MAX_TRADES"]:
@@ -186,17 +188,17 @@ def buy(pair):
 
     price = float(pair["priceUsd"])
 
-    print(f"🚀 BUY {symbol}")
+    print(f"🚀 BUY {base_symbol}")
 
-    ok = swap(WSOL, base, CONFIG["BUY_AMOUNT"])
+    ok = swap(WSOL, base_address, CONFIG["BUY_AMOUNT"])
 
     if not ok:
         return
 
     trade = {
 
-        "token": base,
-        "symbol": symbol,
+        "token": base_address,
+        "symbol": base_symbol,
         "buy_price": price,
         "time": time.time()
 
@@ -204,14 +206,14 @@ def buy(pair):
 
     active_trades.append(trade)
 
-    seen_tokens.add(base)
+    seen_tokens.add(base_address)
 
     stats["trades"] += 1
 
     send(f"""
 🚀 COMPRA
 
-Token: {symbol}
+Token: {base_symbol}
 Preço: ${price}
 
 Liquidez: ${liquidity}
@@ -292,7 +294,7 @@ def scanner():
 
         print("🔎 scanning...")
 
-        url = "https://api.dexscreener.com/latest/dex/search?q=sol"
+        url = "https://api.dexscreener.com/latest/dex/pairs/solana"
 
         data = safe_get(url)
 
@@ -302,7 +304,7 @@ def scanner():
 
         pairs = data["pairs"]
 
-        for pair in pairs:
+        for pair in pairs[:40]:
 
             try:
                 buy(pair)

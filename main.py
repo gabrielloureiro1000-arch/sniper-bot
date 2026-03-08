@@ -13,10 +13,10 @@ from solders.transaction import VersionedTransaction
 
 # ================= ENV =================
 
-RPC_URL = os.environ.get("RPC_URL")
-PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+RPC_URL = os.getenv("RPC_URL")
+PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 if not RPC_URL or not PRIVATE_KEY:
     raise Exception("ENV variables missing")
@@ -39,21 +39,20 @@ CONFIG = {
 
     "BUY_AMOUNT": 0.02,
 
-    "MIN_LIQUIDITY": 1500,
-    "MIN_VOLUME": 600,
+    "MIN_LIQUIDITY": 2000,
+    "MIN_VOLUME": 800,
 
     "TAKE_PROFIT": 1.8,
     "STOP_LOSS": 0.65,
 
-    "SCAN_INTERVAL": 8,
+    "SCAN_INTERVAL": 10,
 
-    "MAX_TRADES": 3
+    "MAX_TRADES": 2
 }
 
 
 active_trades = []
 seen_tokens = set()
-blacklist = set()
 
 
 stats = {
@@ -160,18 +159,17 @@ def buy(pair):
 
     symbol = pair["baseToken"]["symbol"]
 
-    # aceitar apenas pares TOKEN/SOL
-    if quote != WSOL:
-        return
-
-    # não comprar SOL
+    # PROTEÇÕES CRÍTICAS
     if base == WSOL:
         return
 
-    if base in seen_tokens:
+    if symbol.upper() == "SOL":
         return
 
-    if base in blacklist:
+    if quote != WSOL:
+        return
+
+    if base in seen_tokens:
         return
 
     if len(active_trades) >= CONFIG["MAX_TRADES"]:
@@ -207,7 +205,6 @@ def buy(pair):
     active_trades.append(trade)
 
     seen_tokens.add(base)
-    blacklist.add(base)
 
     stats["trades"] += 1
 
@@ -269,7 +266,7 @@ def monitor(trade):
         price = get_price(trade["token"])
 
         if not price:
-            time.sleep(5)
+            time.sleep(6)
             continue
 
         if price >= trade["buy_price"] * CONFIG["TAKE_PROFIT"]:
@@ -347,7 +344,7 @@ def home():
 
 if __name__ == "__main__":
 
-    send("🤖 SNIPER MEMECOIN INICIADO")
+    send("🤖 SNIPER MEMECOIN ONLINE")
 
     threading.Thread(target=scanner).start()
     threading.Thread(target=report).start()

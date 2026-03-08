@@ -19,7 +19,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
 if not RPC_URL or not PRIVATE_KEY:
-    raise Exception("Variáveis de ambiente faltando")
+    raise Exception("ENV variables missing")
 
 
 # ================= INIT =================
@@ -39,13 +39,13 @@ CONFIG = {
 
     "BUY_AMOUNT": 0.02,
 
-    "MIN_LIQUIDITY": 1000,
-    "MIN_VOLUME": 500,
+    "MIN_LIQUIDITY": 1500,
+    "MIN_VOLUME": 600,
 
     "TAKE_PROFIT": 1.8,
     "STOP_LOSS": 0.65,
 
-    "SCAN_INTERVAL": 6,
+    "SCAN_INTERVAL": 8,
 
     "MAX_TRADES": 3
 }
@@ -57,7 +57,6 @@ blacklist = set()
 
 
 stats = {
-
     "trades": 0,
     "wins": 0,
     "losses": 0
@@ -156,16 +155,23 @@ def swap(input_mint, output_mint, sol_amount):
 
 def buy(pair):
 
-    token = pair["baseToken"]["address"]
+    base = pair["baseToken"]["address"]
+    quote = pair["quoteToken"]["address"]
+
     symbol = pair["baseToken"]["symbol"]
 
-    if token == WSOL:
+    # aceitar apenas pares TOKEN/SOL
+    if quote != WSOL:
         return
 
-    if token in blacklist:
+    # não comprar SOL
+    if base == WSOL:
         return
 
-    if token in seen_tokens:
+    if base in seen_tokens:
+        return
+
+    if base in blacklist:
         return
 
     if len(active_trades) >= CONFIG["MAX_TRADES"]:
@@ -184,22 +190,24 @@ def buy(pair):
 
     print(f"🚀 BUY {symbol}")
 
-    ok = swap(WSOL, token, CONFIG["BUY_AMOUNT"])
+    ok = swap(WSOL, base, CONFIG["BUY_AMOUNT"])
 
     if not ok:
         return
 
     trade = {
-        "token": token,
+
+        "token": base,
         "symbol": symbol,
         "buy_price": price,
         "time": time.time()
+
     }
 
     active_trades.append(trade)
 
-    blacklist.add(token)
-    seen_tokens.add(token)
+    seen_tokens.add(base)
+    blacklist.add(base)
 
     stats["trades"] += 1
 
@@ -212,6 +220,7 @@ Preço: ${price}
 Liquidez: ${liquidity}
 Volume: ${volume}
 """)
+
 
     threading.Thread(
         target=monitor,
@@ -275,7 +284,7 @@ def monitor(trade):
             sell(trade)
             return
 
-        time.sleep(5)
+        time.sleep(6)
 
 
 # ================= SCANNER =================
@@ -299,9 +308,7 @@ def scanner():
         for pair in pairs:
 
             try:
-
                 buy(pair)
-
             except:
                 pass
 
@@ -317,7 +324,7 @@ def report():
         time.sleep(7200)
 
         send(f"""
-📊 RELATÓRIO
+📊 RELATÓRIO BOT
 
 Trades: {stats["trades"]}
 Wins: {stats["wins"]}

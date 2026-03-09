@@ -1,4 +1,3 @@
-:::writing{variant="standard" id="73541"}
 import os
 import time
 import threading
@@ -25,7 +24,6 @@ client = Client(RPC_URL)
 wallet = Keypair.from_base58_string(PRIVATE_KEY)
 
 BUY_AMOUNT = 0.02
-
 MIN_LIQ = 700
 MIN_VOLUME = 150
 
@@ -34,7 +32,6 @@ STOP_LOSS = 0.65
 
 MAX_TOKEN_AGE = 1200
 MAX_TRADES = 4
-
 SCAN_INTERVAL = 8
 
 active_trades = []
@@ -145,7 +142,7 @@ def buy(pair):
 
     price=float(pair["priceUsd"])
 
-    print("🚀 BUY",symbol)
+    print("BUY",symbol)
 
     ok=swap(WSOL,base_addr,BUY_AMOUNT)
 
@@ -164,7 +161,7 @@ def buy(pair):
 
     stats["trades"]+=1
 
-    send(f"🚀 COMPRA\nToken: {symbol}\nPreço: ${price}\nLiquidez: ${liquidity}\nVolume: ${volume}")
+    send(f"COMPRA {symbol} preço ${price}")
 
     threading.Thread(
         target=monitor,
@@ -185,7 +182,6 @@ def sell(trade):
     swap(token,WSOL,BUY_AMOUNT)
 
     pnl=price/trade["buy_price"]
-
     profit=(pnl-1)*100
 
     stats["profit"]+=profit
@@ -195,7 +191,7 @@ def sell(trade):
     else:
         stats["losses"]+=1
 
-    send(f"💰 VENDA\nToken: {symbol}\nResultado: {round(profit,2)}%")
+    send(f"VENDA {symbol} resultado {round(profit,2)}%")
 
     active_trades.remove(trade)
 
@@ -229,7 +225,7 @@ def scanner():
 
     while True:
 
-        print("🔎 scanning...")
+        print("scanning")
 
         data=safe_get(
         "https://api.dexscreener.com/latest/dex/pairs/solana"
@@ -256,7 +252,7 @@ def report():
 
         time.sleep(7200)
 
-        send(f"📊 RELATÓRIO 2H\nTrades: {stats['trades']}\nWins: {stats['wins']}\nLosses: {stats['losses']}\nLucro: {round(stats['profit'],2)}%\nAtivos: {len(active_trades)}")
+        send(f"RELATORIO trades {stats['trades']} lucro {stats['profit']}")
 
 app=Flask(__name__)
 
@@ -266,7 +262,7 @@ def home():
 
 def start():
 
-    send("🤖 SNIPER ONLINE")
+    send("SNIPER ONLINE")
 
     threading.Thread(target=scanner,daemon=True).start()
     threading.Thread(target=report,daemon=True).start()
@@ -275,4 +271,4 @@ if __name__=="__main__":
 
     start()
 
-    app.run(host="0.0.0.0",port=10000):::
+    app.run(host="0.0.0.0",port=10000)

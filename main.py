@@ -10,9 +10,10 @@ from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-# ===============================
+
+# =========================
 # ENV
-# ===============================
+# =========================
 
 RPC_URL = os.getenv("RPC_URL")
 PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")
@@ -21,9 +22,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 WSOL = "So11111111111111111111111111111111111111112"
 
-# ===============================
+# =========================
 # INIT
-# ===============================
+# =========================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -31,24 +32,24 @@ client = Client(RPC_URL)
 
 wallet = Keypair.from_base58_string(PRIVATE_KEY)
 
-# ===============================
+# =========================
 # CONFIG
-# ===============================
+# =========================
 
 BUY_AMOUNT = 0.02
 
-MIN_LIQ = 3000
-MIN_VOLUME = 1000
-
 TAKE_PROFIT = 2.0
-STOP_LOSS = 0.65
+STOP_LOSS = 0.7
 
-SCAN_INTERVAL = 12
+MIN_LIQ = 4000
+MIN_VOLUME = 1500
+
+SCAN_INTERVAL = 10
 MAX_TRADES = 3
 
-# ===============================
+# =========================
 # STATE
-# ===============================
+# =========================
 
 active_trades = []
 seen_tokens = set()
@@ -60,9 +61,9 @@ stats = {
     "profit": 0
 }
 
-# ===============================
+# =========================
 # TELEGRAM
-# ===============================
+# =========================
 
 def send(msg):
     try:
@@ -70,9 +71,9 @@ def send(msg):
     except:
         pass
 
-# ===============================
+# =========================
 # HTTP
-# ===============================
+# =========================
 
 def safe_get(url):
     try:
@@ -83,9 +84,9 @@ def safe_get(url):
     except:
         return None
 
-# ===============================
+# =========================
 # PRICE
-# ===============================
+# =========================
 
 def get_price(token):
 
@@ -103,9 +104,9 @@ def get_price(token):
 
     return float(pairs[0]["priceUsd"])
 
-# ===============================
-# SWAP
-# ===============================
+# =========================
+# SWAP ENGINE
+# =========================
 
 def swap(input_mint, output_mint, amount):
 
@@ -146,9 +147,9 @@ def swap(input_mint, output_mint, amount):
 
         return False
 
-# ===============================
-# BUY
-# ===============================
+# =========================
+# BUY ENGINE
+# =========================
 
 def buy(pair):
 
@@ -164,9 +165,6 @@ def buy(pair):
         return
 
     if base_addr == WSOL:
-        return
-
-    if symbol.upper() == "SOL":
         return
 
     if base_addr in seen_tokens:
@@ -220,9 +218,9 @@ Volume: ${volume}
         daemon=True
     ).start()
 
-# ===============================
-# SELL
-# ===============================
+# =========================
+# SELL ENGINE
+# =========================
 
 def sell(trade):
 
@@ -256,9 +254,9 @@ Resultado: {round(profit,2)}%
 
     active_trades.remove(trade)
 
-# ===============================
+# =========================
 # MONITOR
-# ===============================
+# =========================
 
 def monitor(trade):
 
@@ -286,9 +284,9 @@ def monitor(trade):
 
         time.sleep(6)
 
-# ===============================
+# =========================
 # SCANNER
-# ===============================
+# =========================
 
 def scanner():
 
@@ -306,7 +304,7 @@ def scanner():
 
         pairs = data["pairs"]
 
-        for pair in pairs[:60]:
+        for pair in pairs[:80]:
 
             try:
                 buy(pair)
@@ -315,9 +313,9 @@ def scanner():
 
         time.sleep(SCAN_INTERVAL)
 
-# ===============================
+# =========================
 # REPORT
-# ===============================
+# =========================
 
 def report():
 
@@ -337,9 +335,9 @@ Lucro acumulado: {round(stats["profit"],2)}%
 Trades ativos: {len(active_trades)}
 """)
 
-# ===============================
+# =========================
 # SERVER
-# ===============================
+# =========================
 
 app = Flask(__name__)
 
@@ -347,16 +345,15 @@ app = Flask(__name__)
 def home():
     return "sniper running"
 
-# ===============================
+# =========================
 # START
-# ===============================
+# =========================
 
 def start():
 
-    send("🤖 SNIPER ONLINE")
+    send("🤖 SNIPER BOT ONLINE")
 
     threading.Thread(target=scanner, daemon=True).start()
-
     threading.Thread(target=report, daemon=True).start()
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-import requests
-import time
 import os
-import telebot
+import time
 import threading
+import requests
+import telebot
 from flask import Flask
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -11,13 +11,16 @@ CHAT_ID = os.getenv("CHAT_ID")
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 seen_tokens = set()
+alerts_sent = 0
 
 SCAN_INTERVAL = 3
 
 
 def send(msg):
+    global alerts_sent
     try:
         bot.send_message(CHAT_ID, msg, disable_web_page_preview=True)
+        alerts_sent += 1
     except Exception as e:
         print("telegram error:", e)
 
@@ -40,7 +43,6 @@ def scan_dex():
                 continue
 
             data = r.json()
-
             pairs = data.get("pairs", [])
 
             for pair in pairs:
@@ -75,13 +77,15 @@ def scan_dex():
                 dex = f"https://dexscreener.com/solana/{token}"
 
                 msg = f"""
-🚨 TOKEN DETECTADO
+🚨 MEMECOIN DETECTADA
 
 Token: {symbol}
 
 Liquidez: ${round(liquidity)}
-Volume: ${round(volume)}
+Volume 24h: ${round(volume)}
 Transações: {tx}
+
+Analisar rápido:
 
 GMGN
 {gmgn}
@@ -112,7 +116,7 @@ def scan_pump():
             r = requests.get(url, timeout=10)
 
             if r.status_code != 200:
-                time.sleep(5)
+                time.sleep(10)
                 continue
 
             data = r.json()
@@ -120,7 +124,7 @@ def scan_pump():
             for coin in data:
 
                 token = coin.get("mint")
-                name = coin.get("symbol")
+                symbol = coin.get("symbol", "UNKNOWN")
 
                 if not token:
                     continue
@@ -135,9 +139,9 @@ def scan_pump():
                 msg = f"""
 🔥 NOVO TOKEN PUMPFUN
 
-Token: {name}
+Token: {symbol}
 
-ANALISAR
+Analisar:
 
 GMGN
 {gmgn}
@@ -153,14 +157,17 @@ GMGN
 
 def report():
 
+    global alerts_sent
+
     while True:
 
         time.sleep(7200)
 
         msg = f"""
-📊 RELATÓRIO
+📊 RELATÓRIO DO BOT
 
-Tokens monitorados: {len(seen_tokens)}
+Tokens detectados: {len(seen_tokens)}
+Alertas enviados: {alerts_sent}
 
 Status: ONLINE
 """
@@ -190,5 +197,4 @@ if __name__ == "__main__":
     start()
 
     port = int(os.environ.get("PORT", 10000))
-
     app.run(host="0.0.0.0", port=port)

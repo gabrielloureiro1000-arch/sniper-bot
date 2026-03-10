@@ -5,58 +5,32 @@ import telebot
 from flask import Flask
 import threading
 
-TELEGRAM_TOKEN=os.getenv("TELEGRAM_TOKEN")
-CHAT_ID=os.getenv("CHAT_ID")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-bot=telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-seen=set()
+# tokens já enviados
+seen_tokens = {}
 
-SCAN_INTERVAL=5
+SCAN_INTERVAL = 5
+
+# filtros
+MIN_LIQUIDITY = 500
+MIN_TX = 3
+MAX_TOKEN_AGE = 3600
+
+alerts_sent = 0
+
 
 def send(msg):
-
+    global alerts_sent
     try:
-        bot.send_message(CHAT_ID,msg,disable_web_page_preview=True)
-    except:
-        pass
+        bot.send_message(CHAT_ID, msg, disable_web_page_preview=True)
+        alerts_sent += 1
+    except Exception as e:
+        print("telegram error", e)
 
-def http(url):
-
-    try:
-        r=requests.get(url,timeout=10)
-        if r.status_code!=200:
-            return None
-        return r.json()
-    except:
-        return None
-
-def score(liq,vol,tx):
-
-    s=0
-
-    if liq>5000:
-        s+=3
-    elif liq>1000:
-        s+=2
-    else:
-        s+=1
-
-    if vol>10000:
-        s+=3
-    elif vol>2000:
-        s+=2
-    else:
-        s+=1
-
-    if tx>200:
-        s+=3
-    elif tx>80:
-        s+=2
-    else:
-        s+=1
-
-    return round((s/9)*10,1)
 
 def scan():
 
@@ -64,45 +38,58 @@ def scan():
 
         print("scanning")
 
-        data=http("https://api.dexscreener.com/latest/dex/pairs/solana")
+        try:
 
-        if data:
+            url = "https://api.dexscreener.com/latest/dex/pairs/solana"
+            r = requests.get(url, timeout=10)
 
-            for pair in data["pairs"][:300]:
+            if r.status_code != 200:
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            data = r.json()
+
+            for pair in data["pairs"]:
 
                 try:
 
-                    token=pair["baseToken"]["address"]
+                    token = pair["baseToken"]["address"]
+                    name = pair["baseToken"]["symbol"]
 
-                    if token in seen:
+                    liquidity = pair["liquidity"]["usd"]
+                    tx = pair["txns"]["h24"]["buys"] + pair["txns"]["h24"]["sells"]
+
+                    created = pair.get("pairCreatedAt", 0)
+                    age = int(time.time() * 1000) - created
+
+                    if token in seen_tokens:
                         continue
 
-                    seen.add(token)
+                    if liquidity < MIN_LIQUIDITY:
+                        continue
 
-                    name=pair["baseToken"]["symbol"]
+                    if tx < MIN_TX:
+                        continue
 
-                    liq=float(pair["liquidity"]["usd"])
+                    if age > MAX_TOKEN_AGE * 1000:
+                        continue
 
-                    vol=float(pair["volume"]["h24"])
+                    seen_tokens[token] = True
 
-                    tx=pair["txns"]["h24"]["buys"]+pair["txns"]["h24"]["sells"]
+                    gmgn = f"https://gmgn.ai/sol/token/{token}"
+                    dex = f"https://dexscreener.com/solana/{token}"
 
-                    sc=score(liq,vol,tx)
-
-                    gmgn=f"https://gmgn.ai/sol/token/{token}"
-
-                    dex=f"https://dexscreener.com/solana/{token}"
-
-                    msg=f"""
-🚨 NEW TOKEN
+                    msg = f"""
+🚨 NOVO TOKEN DETECTADO
 
 Token: {name}
 
-Liquidity: ${round(liq)}
-Volume: ${round(vol)}
-Transactions: {tx}
+Liquidez: ${round(liquidity)}
+Transações: {tx}
 
-Score: {sc}/10
+Idade: {round(age/60000)} minutos
+
+🔎 ANALISAR:
 
 GMGN
 {gmgn}
@@ -113,10 +100,14 @@ Dexscreener
 
                     send(msg)
 
-                except:
-                    pass
+                except Exception as e:
+                    print("pair error", e)
+
+        except Exception as e:
+            print("scan error", e)
 
         time.sleep(SCAN_INTERVAL)
+
 
 def report():
 
@@ -124,23 +115,38 @@ def report():
 
         time.sleep(7200)
 
-        send("📊 Scanner ativo nas últimas 2 horas")
+        msg = f"""
+📊 RELATÓRIO 2 HORAS
 
-app=Flask(__name__)
+Scanner ativo
+
+Tokens analisados: {len(seen_tokens)}
+Alertas enviados: {alerts_sent}
+
+Status: ONLINE
+"""
+
+        send(msg)
+
+
+app = Flask(__name__)
+
 
 @app.route("/")
 def home():
-    return "scanner running"
+    return "memecoin scanner running"
+
 
 def start():
 
-    send("🤖 MEMECOIN SCANNER ONLINE")
+    send("🤖 MEMECOIN SCANNER INICIADO")
 
-    threading.Thread(target=scan,daemon=True).start()
-    threading.Thread(target=report,daemon=True).start()
+    threading.Thread(target=scan, daemon=True).start()
+    threading.Thread(target=report, daemon=True).start()
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
 
     start()
 
-    app.run(host="0.0.0.0",port=10000)
+    app.run(host="0.0.0.0", port=10000)

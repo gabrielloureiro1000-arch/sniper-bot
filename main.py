@@ -10,26 +10,20 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# tokens já enviados
-seen_tokens = {}
+seen_tokens = set()
 
-SCAN_INTERVAL = 5
+SCAN_INTERVAL = 4
 
-# filtros
-MIN_LIQUIDITY = 500
-MIN_TX = 3
-MAX_TOKEN_AGE = 3600
-
-alerts_sent = 0
+alerts = 0
 
 
 def send(msg):
-    global alerts_sent
+    global alerts
     try:
         bot.send_message(CHAT_ID, msg, disable_web_page_preview=True)
-        alerts_sent += 1
+        alerts += 1
     except Exception as e:
-        print("telegram error", e)
+        print("telegram error:", e)
 
 
 def scan():
@@ -56,40 +50,36 @@ def scan():
                     token = pair["baseToken"]["address"]
                     name = pair["baseToken"]["symbol"]
 
-                    liquidity = pair["liquidity"]["usd"]
-                    tx = pair["txns"]["h24"]["buys"] + pair["txns"]["h24"]["sells"]
-
-                    created = pair.get("pairCreatedAt", 0)
-                    age = int(time.time() * 1000) - created
-
                     if token in seen_tokens:
                         continue
 
-                    if liquidity < MIN_LIQUIDITY:
+                    liquidity = pair["liquidity"]["usd"]
+                    buys = pair["txns"]["h24"]["buys"]
+                    sells = pair["txns"]["h24"]["sells"]
+
+                    tx = buys + sells
+
+                    # filtros mínimos (bem baixos para pegar memecoin cedo)
+                    if liquidity < 100:
                         continue
 
-                    if tx < MIN_TX:
+                    if tx < 1:
                         continue
 
-                    if age > MAX_TOKEN_AGE * 1000:
-                        continue
-
-                    seen_tokens[token] = True
+                    seen_tokens.add(token)
 
                     gmgn = f"https://gmgn.ai/sol/token/{token}"
                     dex = f"https://dexscreener.com/solana/{token}"
 
                     msg = f"""
-🚨 NOVO TOKEN DETECTADO
+🚨 NOVO TOKEN
 
 Token: {name}
 
 Liquidez: ${round(liquidity)}
 Transações: {tx}
 
-Idade: {round(age/60000)} minutos
-
-🔎 ANALISAR:
+🔎 ANALISAR
 
 GMGN
 {gmgn}
@@ -100,11 +90,11 @@ Dexscreener
 
                     send(msg)
 
-                except Exception as e:
-                    print("pair error", e)
+                except:
+                    pass
 
         except Exception as e:
-            print("scan error", e)
+            print("scan error:", e)
 
         time.sleep(SCAN_INTERVAL)
 
@@ -120,10 +110,8 @@ def report():
 
 Scanner ativo
 
-Tokens analisados: {len(seen_tokens)}
-Alertas enviados: {alerts_sent}
-
-Status: ONLINE
+Tokens detectados: {len(seen_tokens)}
+Alertas enviados: {alerts}
 """
 
         send(msg)
@@ -134,12 +122,12 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "memecoin scanner running"
+    return "scanner running"
 
 
 def start():
 
-    send("🤖 MEMECOIN SCANNER INICIADO")
+    send("🤖 MEMECOIN SCANNER ONLINE")
 
     threading.Thread(target=scan, daemon=True).start()
     threading.Thread(target=report, daemon=True).start()
@@ -149,4 +137,5 @@ if __name__ == "__main__":
 
     start()
 
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)

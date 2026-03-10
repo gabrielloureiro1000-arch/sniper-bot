@@ -10,29 +10,29 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-seen = set()
-alerts = 0
+seen_tokens = set()
+alerts_sent = 0
 
-SCAN_DEX = 3
-SCAN_PUMP = 6
+DEX_INTERVAL = 3
+PUMP_INTERVAL = 6
 
 
 def send(msg):
-    global alerts
+    global alerts_sent
     try:
         bot.send_message(CHAT_ID, msg, disable_web_page_preview=True)
-        alerts += 1
+        alerts_sent += 1
     except Exception as e:
         print("telegram error:", e)
 
 
 # =========================
-# DEXSCREENER SCANNER
+# SCAN DEXSCREENER
 # =========================
 
 def scan_dex():
 
-    global seen
+    global seen_tokens
 
     while True:
 
@@ -44,11 +44,10 @@ def scan_dex():
             r = requests.get(url, timeout=10)
 
             if r.status_code != 200:
-                time.sleep(SCAN_DEX)
+                time.sleep(DEX_INTERVAL)
                 continue
 
             data = r.json()
-
             pairs = data.get("pairs", [])
 
             for pair in pairs:
@@ -60,7 +59,7 @@ def scan_dex():
                 if not token:
                     continue
 
-                if token in seen:
+                if token in seen_tokens:
                     continue
 
                 liquidity = pair.get("liquidity", {}).get("usd", 0) or 0
@@ -71,13 +70,14 @@ def scan_dex():
 
                 tx = buys + sells
 
-                if liquidity < 300:
+                # filtros corrigidos para detectar cedo
+                if liquidity < 30:
                     continue
 
-                if tx < 8:
+                if tx < 2:
                     continue
 
-                seen.add(token)
+                seen_tokens.add(token)
 
                 gmgn = f"https://gmgn.ai/sol/token/{token}"
                 dex = f"https://dexscreener.com/solana/{token}"
@@ -103,16 +103,16 @@ Dexscreener
         except Exception as e:
             print("dex error:", e)
 
-        time.sleep(SCAN_DEX)
+        time.sleep(DEX_INTERVAL)
 
 
 # =========================
-# PUMPFUN SCANNER
+# SCAN PUMPFUN
 # =========================
 
 def scan_pump():
 
-    global seen
+    global seen_tokens
 
     while True:
 
@@ -124,7 +124,7 @@ def scan_pump():
             r = requests.get(url, timeout=10)
 
             if r.status_code != 200:
-                time.sleep(SCAN_PUMP)
+                time.sleep(PUMP_INTERVAL)
                 continue
 
             data = r.json()
@@ -137,10 +137,10 @@ def scan_pump():
                 if not token:
                     continue
 
-                if token in seen:
+                if token in seen_tokens:
                     continue
 
-                seen.add(token)
+                seen_tokens.add(token)
 
                 gmgn = f"https://gmgn.ai/sol/token/{token}"
 
@@ -149,7 +149,7 @@ def scan_pump():
 
 Token: {symbol}
 
-ANALISAR
+Analisar rápido:
 
 GMGN
 {gmgn}
@@ -160,7 +160,7 @@ GMGN
         except Exception as e:
             print("pump error:", e)
 
-        time.sleep(SCAN_PUMP)
+        time.sleep(PUMP_INTERVAL)
 
 
 # =========================
@@ -169,17 +169,17 @@ GMGN
 
 def report():
 
-    global alerts
+    global alerts_sent
 
     while True:
 
         time.sleep(7200)
 
         msg = f"""
-📊 RELATÓRIO SNIPER
+📊 RELATÓRIO DO BOT
 
-Tokens detectados: {len(seen)}
-Alertas enviados: {alerts}
+Tokens detectados: {len(seen_tokens)}
+Alertas enviados: {alerts_sent}
 
 Status: ONLINE
 """
@@ -201,7 +201,7 @@ def home():
 
 def start():
 
-    send("🚀 SNIPER EXTREMO ONLINE")
+    send("🚀 MEMECOIN SNIPER ONLINE")
 
     threading.Thread(target=scan_dex).start()
     threading.Thread(target=scan_pump).start()

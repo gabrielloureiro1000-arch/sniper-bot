@@ -10,10 +10,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-seen_tokens = set()
+seen = set()
 
 SCAN_INTERVAL = 4
-
 alerts = 0
 
 
@@ -34,7 +33,8 @@ def scan():
 
         try:
 
-            url = "https://api.dexscreener.com/latest/dex/pairs/solana"
+            url = "https://api.dexscreener.com/latest/dex/search/?q=solana"
+
             r = requests.get(url, timeout=10)
 
             if r.status_code != 200:
@@ -50,7 +50,7 @@ def scan():
                     token = pair["baseToken"]["address"]
                     name = pair["baseToken"]["symbol"]
 
-                    if token in seen_tokens:
+                    if token in seen:
                         continue
 
                     liquidity = pair["liquidity"]["usd"]
@@ -59,27 +59,25 @@ def scan():
 
                     tx = buys + sells
 
-                    # filtros mínimos (bem baixos para pegar memecoin cedo)
-                    if liquidity < 100:
+                    # filtros mínimos
+                    if liquidity < 50:
                         continue
 
                     if tx < 1:
                         continue
 
-                    seen_tokens.add(token)
+                    seen.add(token)
 
                     gmgn = f"https://gmgn.ai/sol/token/{token}"
                     dex = f"https://dexscreener.com/solana/{token}"
 
                     msg = f"""
-🚨 NOVO TOKEN
+🚨 TOKEN ATIVO DETECTADO
 
 Token: {name}
 
 Liquidez: ${round(liquidity)}
 Transações: {tx}
-
-🔎 ANALISAR
 
 GMGN
 {gmgn}
@@ -108,10 +106,10 @@ def report():
         msg = f"""
 📊 RELATÓRIO 2 HORAS
 
-Scanner ativo
-
-Tokens detectados: {len(seen_tokens)}
+Tokens analisados: {len(seen)}
 Alertas enviados: {alerts}
+
+Status: ONLINE
 """
 
         send(msg)

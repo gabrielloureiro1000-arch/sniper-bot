@@ -10,29 +10,29 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-seen_tokens = set()
-alerts_sent = 0
+seen = set()
+alerts = 0
 
-DEX_INTERVAL = 3
-PUMP_INTERVAL = 6
+DEX_INTERVAL = 5
+PUMP_INTERVAL = 10
 
 
 def send(msg):
-    global alerts_sent
+    global alerts
     try:
         bot.send_message(CHAT_ID, msg, disable_web_page_preview=True)
-        alerts_sent += 1
+        alerts += 1
     except Exception as e:
         print("telegram error:", e)
 
 
-# =========================
-# SCAN DEXSCREENER
-# =========================
+# =====================
+# DEXSCREENER SCANNER
+# =====================
 
 def scan_dex():
 
-    global seen_tokens
+    global seen
 
     while True:
 
@@ -40,7 +40,7 @@ def scan_dex():
 
         try:
 
-            url = "https://api.dexscreener.com/latest/dex/pairs/solana"
+            url = "https://api.dexscreener.com/latest/dex/search/?q=sol"
             r = requests.get(url, timeout=10)
 
             if r.status_code != 200:
@@ -59,7 +59,7 @@ def scan_dex():
                 if not token:
                     continue
 
-                if token in seen_tokens:
+                if token in seen:
                     continue
 
                 liquidity = pair.get("liquidity", {}).get("usd", 0) or 0
@@ -70,25 +70,24 @@ def scan_dex():
 
                 tx = buys + sells
 
-                # filtros corrigidos para detectar cedo
-                if liquidity < 30:
+                if liquidity < 20:
                     continue
 
-                if tx < 2:
+                if tx < 1:
                     continue
 
-                seen_tokens.add(token)
+                seen.add(token)
 
                 gmgn = f"https://gmgn.ai/sol/token/{token}"
                 dex = f"https://dexscreener.com/solana/{token}"
 
                 msg = f"""
-🚨 MEMECOIN DETECTADA
+🚨 TOKEN DETECTADO
 
 Token: {symbol}
 
 Liquidez: ${round(liquidity)}
-Volume 24h: ${round(volume)}
+Volume: ${round(volume)}
 Transações: {tx}
 
 GMGN
@@ -106,13 +105,13 @@ Dexscreener
         time.sleep(DEX_INTERVAL)
 
 
-# =========================
-# SCAN PUMPFUN
-# =========================
+# =====================
+# PUMPFUN SCANNER
+# =====================
 
 def scan_pump():
 
-    global seen_tokens
+    global seen
 
     while True:
 
@@ -137,10 +136,10 @@ def scan_pump():
                 if not token:
                     continue
 
-                if token in seen_tokens:
+                if token in seen:
                     continue
 
-                seen_tokens.add(token)
+                seen.add(token)
 
                 gmgn = f"https://gmgn.ai/sol/token/{token}"
 
@@ -149,7 +148,7 @@ def scan_pump():
 
 Token: {symbol}
 
-Analisar rápido:
+ANALISAR
 
 GMGN
 {gmgn}
@@ -163,13 +162,13 @@ GMGN
         time.sleep(PUMP_INTERVAL)
 
 
-# =========================
+# =====================
 # RELATÓRIO
-# =========================
+# =====================
 
 def report():
 
-    global alerts_sent
+    global alerts
 
     while True:
 
@@ -178,8 +177,8 @@ def report():
         msg = f"""
 📊 RELATÓRIO DO BOT
 
-Tokens detectados: {len(seen_tokens)}
-Alertas enviados: {alerts_sent}
+Tokens detectados: {len(seen)}
+Alertas enviados: {alerts}
 
 Status: ONLINE
 """
@@ -187,9 +186,9 @@ Status: ONLINE
         send(msg)
 
 
-# =========================
+# =====================
 # SERVER
-# =========================
+# =====================
 
 app = Flask(__name__)
 
@@ -213,5 +212,4 @@ if __name__ == "__main__":
     start()
 
     port = int(os.environ.get("PORT", 10000))
-
     app.run(host="0.0.0.0", port=port)

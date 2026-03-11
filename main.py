@@ -8,19 +8,22 @@ from flask import Flask
 # ─── CONFIG ────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
-MIN_SCORE      = int(os.getenv("MIN_SCORE", "40"))       # 0-100, filtra tokens fracos
-MIN_LIQUIDITY  = int(os.getenv("MIN_LIQUIDITY", "500"))  # em USD
-MIN_TX         = int(os.getenv("MIN_TX", "10"))          # mínimo de transações
-DEX_INTERVAL   = int(os.getenv("DEX_INTERVAL", "5"))     # segundos
-PUMP_INTERVAL  = int(os.getenv("PUMP_INTERVAL", "10"))   # segundos
+
+# Filtros — ajuste via variáveis de ambiente no Render
+MIN_SCORE     = int(os.getenv("MIN_SCORE", "60"))        # Score mínimo (0-100)
+MIN_LIQUIDITY = int(os.getenv("MIN_LIQUIDITY", "5000"))  # Liquidez mínima USD
+MIN_VOLUME    = int(os.getenv("MIN_VOLUME", "10000"))    # Volume 24h mínimo USD
+MIN_BUY_RATIO = float(os.getenv("MIN_BUY_RATIO", "2.0"))# Ratio compra/venda mínimo
+MIN_BUYS      = int(os.getenv("MIN_BUYS", "50"))         # Mínimo de compras 24h
+DEX_INTERVAL  = int(os.getenv("DEX_INTERVAL", "5"))
+PUMP_INTERVAL = int(os.getenv("PUMP_INTERVAL", "10"))
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+app = Flask(__name__)
 
 seen   = set()
 alerts = 0
-stats  = {"compra": 0, "venda": 0, "neutro": 0}
-
-app = Flask(__name__)
+stats  = {"compra": 0, "observar": 0, "ignorado": 0}
 
 
 # ─── TELEGRAM ──────────────────────────────────────────────────────────────
@@ -33,81 +36,111 @@ def send(msg):
         print("telegram error:", e)
 
 
-# ─── SCORE + SINAL ─────────────────────────────────────────────────────────
-def calcular_score(liq, buys, sells, vol, price_change_5m=0):
-    """
-    Retorna (score 0-100, sinal, razoes[])
-    """
-    ratio  = buys / max(sells, 1)
+# ─── SCORE DE MOMENTUM ─────────────────────────────────────────────────────
+#
+# Foco em UMA coisa: tokens sendo comprados com intensidade REAL agora,
+# com liquidez suficiente para entrar e sair sem perder no slippage.
+#
+def calcular_score(liq, vol, buys, sells, pc5m, pc1h, pc6h):
+    score  = 0
     razoes = []
-    pontos = 0
+    riscos = []
+    ratio  = buys / max(sells, 1)
 
-    # Liquidez
-    if liq >= 50000:
-        pontos += 20
-        razoes.append("✅ Liquidez alta: ${:,.0f}".format(liq))
-    elif liq >= 5000:
-        pontos += 10
-        razoes.append("🟡 Liquidez média: ${:,.0f}".format(liq))
+    # 1. LIQUIDEZ — base de segurança para entrar e sair
+    if liq >= 100_000:
+        score += 25
+        razoes.append("✅ Liquidez forte: ${:,.0f}".format(liq))
+    elif liq >= 20_000:
+        score += 15
+        razoes.append("✅ Liquidez ok: ${:,.0f}".format(liq))
+    elif liq >= 5_000:
+        score += 5
+        razoes.append("🟡 Liquidez baixa: ${:,.0f}".format(liq))
     else:
-        razoes.append("⚠️ Liquidez baixa: ${:,.0f}".format(liq))
+        riscos.append("🚨 Liquidez muito baixa — rug pull fácil")
 
-    # Ratio compra/venda
-    if ratio >= 5:
-        pontos += 30
-        razoes.append("✅ Ratio C/V excelente: {:.1f}x".format(ratio))
+    # 2. RATIO COMPRA/VENDA — intensidade real de compra
+    if ratio >= 8:
+        score += 30
+        razoes.append("✅ Pressão de compra extrema: {:.1f}x".format(ratio))
+    elif ratio >= 5:
+        score += 22
+        razoes.append("✅ Pressão de compra alta: {:.1f}x".format(ratio))
     elif ratio >= 2:
-        pontos += 18
-        razoes.append("✅ Ratio C/V bom: {:.1f}x".format(ratio))
-    elif ratio >= 1:
-        pontos += 8
-        razoes.append("🟡 Ratio C/V neutro: {:.1f}x".format(ratio))
+        score += 12
+        razoes.append("🟡 Pressão de compra moderada: {:.1f}x".format(ratio))
     else:
-        razoes.append("🔴 Pressão de venda: {:.1f}x".format(ratio))
+        score -= 10
+        riscos.append("⚠️ Ratio baixo ({:.1f}x) — sem interesse real".format(ratio))
 
-    # Volume
-    if vol >= liq * 2:
-        pontos += 20
+    # 3. VOLUME vs LIQUIDEZ — momentum real vs liquidez parada
+    vol_ratio = vol / max(liq, 1)
+    if vol_ratio >= 5:
+        score += 20
+        razoes.append("✅ Volume 5x acima da liquidez — momentum forte")
+    elif vol_ratio >= 2:
+        score += 12
         razoes.append("✅ Volume 2x acima da liquidez")
-    elif vol >= liq:
-        pontos += 10
+    elif vol_ratio >= 1:
+        score += 5
         razoes.append("🟡 Volume similar à liquidez")
+    else:
+        riscos.append("⚠️ Volume baixo para a liquidez — pouco interesse")
 
-    # Transações
-    tx = buys + sells
-    if tx >= 300:
-        pontos += 15
-        razoes.append("✅ Alto número de transações: {}".format(tx))
-    elif tx >= 100:
-        pontos += 8
-        razoes.append("🟡 Transações moderadas: {}".format(tx))
+    # 4. NÚMERO DE COMPRAS — evita volume artificial com poucas txns grandes
+    if buys >= 500:
+        score += 15
+        razoes.append("✅ Muitas compras únicas: {} txns".format(buys))
+    elif buys >= 200:
+        score += 10
+        razoes.append("✅ Compras altas: {} txns".format(buys))
+    elif buys >= 50:
+        score += 4
+        razoes.append("🟡 Compras moderadas: {} txns".format(buys))
+    else:
+        riscos.append("⚠️ Poucas compras — possível manipulação por baleias")
 
-    # Variação de preço (5m)
-    if price_change_5m > 30:
-        pontos += 15
-        razoes.append("✅ Alta de preço em 5m: +{:.0f}%".format(price_change_5m))
-    elif price_change_5m < -20:
-        pontos -= 10
-        razoes.append("🔴 Queda de preço em 5m: {:.0f}%".format(price_change_5m))
+    # 5. VARIAÇÃO DE PREÇO RECENTE — confirmação de pump ativo
+    if pc5m >= 20:
+        score += 10
+        razoes.append("✅ Pump ativo em 5min: +{:.0f}%".format(pc5m))
+    elif pc5m >= 5:
+        score += 5
+        razoes.append("🟡 Alta em 5min: +{:.0f}%".format(pc5m))
+    elif pc5m <= -15:
+        score -= 15
+        riscos.append("🔴 Queda forte em 5min: {:.0f}% — possível dump".format(pc5m))
 
-    score = max(0, min(100, pontos))
+    if pc1h >= 50:
+        score += 8
+        razoes.append("✅ Alta forte em 1h: +{:.0f}%".format(pc1h))
+    elif pc1h <= -30:
+        score -= 10
+        riscos.append("🔴 Queda em 1h: {:.0f}%".format(pc1h))
 
-    # Sinal final
-    if score >= 65 and ratio >= 2:
+    # 6. TENDÊNCIA 6H — já passou do pico?
+    if pc6h >= 300:
+        riscos.append("⚠️ Alta de {:.0f}% em 6h — pode já ter passado o pico".format(pc6h))
+    elif pc6h >= 50:
+        score += 5
+        razoes.append("🟡 Tendência positiva em 6h: +{:.0f}%".format(pc6h))
+
+    score = max(0, min(100, score))
+
+    if score >= 65 and ratio >= MIN_BUY_RATIO and liq >= MIN_LIQUIDITY:
         sinal = "🟢 COMPRA"
-    elif score < 30 or ratio < 0.7:
-        sinal = "🔴 VENDA / EVITAR"
     elif score >= 45:
         sinal = "👀 OBSERVAR"
     else:
         sinal = "⚪ NEUTRO"
 
-    return score, sinal, razoes
+    return score, sinal, razoes, riscos
 
 
 def label_score(score):
-    if score >= 70: return "🔥 HOT"
-    if score >= 45: return "🌡 WARM"
+    if score >= 75: return "🔥 HOT"
+    if score >= 55: return "🌡 WARM"
     return "❄️ COLD"
 
 
@@ -119,15 +152,13 @@ def scan_dex():
         print("[DEX] scanning...")
         try:
             url = "https://api.dexscreener.com/latest/dex/search/?q=sol"
-            r = requests.get(url, timeout=10)
+            r   = requests.get(url, timeout=10)
 
             if r.status_code != 200:
                 time.sleep(DEX_INTERVAL)
                 continue
 
-            pairs = r.json().get("pairs", [])
-
-            for pair in pairs:
+            for pair in r.json().get("pairs", []):
                 base   = pair.get("baseToken", {})
                 token  = base.get("address")
                 symbol = base.get("symbol", "UNKNOWN")
@@ -139,50 +170,50 @@ def scan_dex():
                 vol   = pair.get("volume", {}).get("h24", 0) or 0
                 buys  = pair.get("txns", {}).get("h24", {}).get("buys", 0) or 0
                 sells = pair.get("txns", {}).get("h24", {}).get("sells", 0) or 0
-                tx    = buys + sells
-
                 pc5m  = pair.get("priceChange", {}).get("m5", 0) or 0
+                pc1h  = pair.get("priceChange", {}).get("h1", 0) or 0
+                pc6h  = pair.get("priceChange", {}).get("h6", 0) or 0
 
-                # Filtros mínimos
-                if liq < MIN_LIQUIDITY or tx < MIN_TX:
-                    continue
+                # Filtros hard — descarta antes de calcular score
+                if liq  < MIN_LIQUIDITY:                  continue
+                if vol  < MIN_VOLUME:                     continue
+                if buys < MIN_BUYS:                       continue
+                if buys / max(sells, 1) < MIN_BUY_RATIO:  continue
 
                 seen.add(token)
 
-                score, sinal, razoes = calcular_score(liq, buys, sells, vol, pc5m)
+                score, sinal, razoes, riscos = calcular_score(liq, vol, buys, sells, pc5m, pc1h, pc6h)
 
-                # Pular tokens abaixo do score mínimo
                 if score < MIN_SCORE:
+                    stats["ignorado"] += 1
                     continue
 
-                # Atualizar estatísticas
-                if "COMPRA" in sinal:
-                    stats["compra"] += 1
-                elif "VENDA" in sinal:
-                    stats["venda"] += 1
-                else:
-                    stats["neutro"] += 1
+                stats["compra" if "COMPRA" in sinal else "observar"] += 1
 
                 gmgn = "https://gmgn.ai/sol/token/{}".format(token)
                 dex  = "https://dexscreener.com/solana/{}".format(token)
 
-                razoes_txt = "\n".join("  " + r for r in razoes)
+                razoes_txt = "\n".join("  " + x for x in razoes)
+                riscos_txt = ("\n\n*⚠️ Atenção:*\n" + "\n".join("  " + x for x in riscos)) if riscos else ""
 
                 msg = (
-                    "🚨 *TOKEN DETECTADO — DEX*\n\n"
-                    "*Token:* `{symbol}`\n"
-                    "*Score:* {label} ({score}/100)\n"
-                    "*Sinal:* {sinal}\n\n"
+                    "{sinal} *{symbol}* — {label} {score}/100\n\n"
                     "*Liquidez:* ${liq:,.0f}\n"
                     "*Volume 24h:* ${vol:,.0f}\n"
                     "*Compras:* {buys}  |  *Vendas:* {sells}\n"
-                    "*Δ Preço 5m:* {pc5m:+.1f}%\n\n"
-                    "*Razões:*\n{razoes}\n\n"
+                    "*Ratio C/V:* {ratio:.1f}x\n"
+                    "*Δ 5min:* {pc5m:+.1f}%  |  *Δ 1h:* {pc1h:+.1f}%  |  *Δ 6h:* {pc6h:+.1f}%\n\n"
+                    "*Por que alertei:*\n{razoes}"
+                    "{riscos}\n\n"
                     "[GMGN]({gmgn}) · [DexScreener]({dex})"
                 ).format(
-                    symbol=symbol, label=label_score(score), score=score,
-                    sinal=sinal, liq=liq, vol=vol, buys=buys, sells=sells,
-                    pc5m=pc5m, razoes=razoes_txt, gmgn=gmgn, dex=dex,
+                    sinal=sinal, symbol=symbol,
+                    label=label_score(score), score=score,
+                    liq=liq, vol=vol, buys=buys, sells=sells,
+                    ratio=buys / max(sells, 1),
+                    pc5m=pc5m, pc1h=pc1h, pc6h=pc6h,
+                    razoes=razoes_txt, riscos=riscos_txt,
+                    gmgn=gmgn, dex=dex,
                 )
 
                 send(msg)
@@ -201,7 +232,7 @@ def scan_pump():
         print("[PUMP] scanning...")
         try:
             url = "https://frontend-api.pump.fun/coins/latest"
-            r = requests.get(url, timeout=10)
+            r   = requests.get(url, timeout=10)
 
             if r.status_code != 200:
                 time.sleep(PUMP_INTERVAL)
@@ -217,48 +248,65 @@ def scan_pump():
 
                 seen.add(token)
 
-                # Pump.fun não traz métricas completas — score básico
-                usd_mc = coin.get("usd_market_cap", 0) or 0
+                usd_mc      = coin.get("usd_market_cap", 0) or 0
                 reply_count = coin.get("reply_count", 0) or 0
+                score       = 0
+                razoes      = []
+                riscos      = []
 
-                score = 0
-                razoes = []
+                if usd_mc >= 50_000:
+                    score += 35
+                    razoes.append("✅ Market cap relevante: ${:,.0f}".format(usd_mc))
+                elif usd_mc >= 10_000:
+                    score += 15
+                    razoes.append("🟡 Market cap baixo: ${:,.0f}".format(usd_mc))
+                else:
+                    riscos.append("🚨 Market cap muito baixo — alto risco")
 
-                if usd_mc > 10000:
+                if reply_count >= 100:
                     score += 30
-                    razoes.append("✅ Market cap: ${:,.0f}".format(usd_mc))
-                if reply_count > 20:
+                    razoes.append("✅ Comunidade ativa: {} replies".format(reply_count))
+                elif reply_count >= 30:
+                    score += 15
+                    razoes.append("🟡 Engajamento moderado: {} replies".format(reply_count))
+                else:
+                    riscos.append("⚠️ Pouco engajamento — sem comunidade")
+
+                sociais = sum([
+                    bool(coin.get("twitter")),
+                    bool(coin.get("website")),
+                    bool(coin.get("telegram")),
+                ])
+                if sociais >= 2:
                     score += 20
-                    razoes.append("✅ Engajamento: {} replies".format(reply_count))
-                if coin.get("twitter"):
-                    score += 10
-                    razoes.append("✅ Tem Twitter")
-                if coin.get("website"):
-                    score += 10
-                    razoes.append("✅ Tem website")
-                if coin.get("telegram"):
-                    score += 10
-                    razoes.append("✅ Tem Telegram")
+                    razoes.append("✅ {} redes sociais verificadas".format(sociais))
+                elif sociais == 1:
+                    score += 8
+                else:
+                    riscos.append("⚠️ Sem redes sociais — risco elevado")
 
                 if score < MIN_SCORE:
+                    stats["ignorado"] += 1
                     continue
 
-                sinal = "🟢 COMPRA" if score >= 50 else "👀 OBSERVAR"
-                stats["compra" if "COMPRA" in sinal else "neutro"] += 1
+                sinal = "🟢 COMPRA" if score >= 60 else "👀 OBSERVAR"
+                stats["compra" if "COMPRA" in sinal else "observar"] += 1
 
-                gmgn   = "https://gmgn.ai/sol/token/{}".format(token)
-                razoes_txt = "\n".join("  " + r for r in razoes) if razoes else "  Novo token — analisar manualmente"
+                gmgn       = "https://gmgn.ai/sol/token/{}".format(token)
+                razoes_txt = "\n".join("  " + x for x in razoes)
+                riscos_txt = ("\n\n*⚠️ Atenção:*\n" + "\n".join("  " + x for x in riscos)) if riscos else ""
 
                 msg = (
-                    "🔥 *NOVO TOKEN — PUMP.FUN*\n\n"
-                    "*Token:* `{symbol}` — {name}\n"
-                    "*Score:* {label} ({score}/100)\n"
-                    "*Sinal:* {sinal}\n\n"
-                    "*Razões:*\n{razoes}\n\n"
+                    "{sinal} *{symbol}* — PUMP.FUN — {label} {score}/100\n"
+                    "_{name}_\n\n"
+                    "*Por que alertei:*\n{razoes}"
+                    "{riscos}\n\n"
                     "[Analisar no GMGN]({gmgn})"
                 ).format(
-                    symbol=symbol, name=name, label=label_score(score),
-                    score=score, sinal=sinal, razoes=razoes_txt, gmgn=gmgn,
+                    sinal=sinal, symbol=symbol,
+                    label=label_score(score), score=score,
+                    name=name, razoes=razoes_txt,
+                    riscos=riscos_txt, gmgn=gmgn,
                 )
 
                 send(msg)
@@ -273,39 +321,54 @@ def scan_pump():
 def report():
     while True:
         time.sleep(7200)
+        total = stats["compra"] + stats["observar"] + stats["ignorado"]
         msg = (
-            "📊 *RELATÓRIO DO BOT*\n\n"
-            "Tokens vistos: {seen}\n"
-            "Alertas enviados: {alerts}\n\n"
-            "🟢 Sinais de COMPRA: {compra}\n"
-            "🔴 Sinais de VENDA: {venda}\n"
-            "⚪ Neutros: {neutro}\n\n"
-            "Score mínimo: {min_score}\n"
-            "Status: ✅ ONLINE"
+            "📊 *RELATÓRIO — 2h*\n\n"
+            "Tokens analisados: {total}\n"
+            "🟢 Alertas COMPRA: {compra}\n"
+            "👀 Alertas OBSERVAR: {observar}\n"
+            "❌ Ignorados (abaixo do filtro): {ignorado}\n\n"
+            "📋 Tokens em memória: {seen}\n"
+            "📨 Mensagens enviadas: {alerts}\n\n"
+            "⚙️ *Filtros ativos:*\n"
+            "  Score mín: {min_score}/100\n"
+            "  Liquidez mín: ${min_liq:,}\n"
+            "  Volume mín: ${min_vol:,}\n"
+            "  Ratio C/V mín: {min_ratio}x\n"
+            "  Compras mín: {min_buys} txns"
         ).format(
+            total=total, compra=stats["compra"],
+            observar=stats["observar"], ignorado=stats["ignorado"],
             seen=len(seen), alerts=alerts,
-            compra=stats["compra"], venda=stats["venda"], neutro=stats["neutro"],
-            min_score=MIN_SCORE,
+            min_score=MIN_SCORE, min_liq=MIN_LIQUIDITY,
+            min_vol=MIN_VOLUME, min_ratio=MIN_BUY_RATIO,
+            min_buys=MIN_BUYS,
         )
         send(msg)
 
 
-# ─── FLASK SERVER ──────────────────────────────────────────────────────────
+# ─── SERVER ────────────────────────────────────────────────────────────────
 @app.route("/")
 def home():
-    return "sniper running — tokens: {} | alerts: {}".format(len(seen), alerts)
+    return "sniper online | tokens: {} | alerts: {}".format(len(seen), alerts)
 
 
 # ─── START ─────────────────────────────────────────────────────────────────
 def start():
-    send(
+    send((
         "🚀 *MEMECOIN SNIPER ONLINE*\n\n"
-        "Score mínimo: {}\n"
-        "Liquidez mínima: ${:,}\n"
-        "Scanner DEX: {}s | PUMP: {}s".format(
-            MIN_SCORE, MIN_LIQUIDITY, DEX_INTERVAL, PUMP_INTERVAL
-        )
-    )
+        "⚙️ *Filtros ativos:*\n"
+        "  Score mínimo: {min_score}/100\n"
+        "  Liquidez mínima: ${min_liq:,}\n"
+        "  Volume mínimo: ${min_vol:,}\n"
+        "  Ratio compra/venda: ≥{min_ratio}x\n"
+        "  Compras mínimas: {min_buys} txns\n\n"
+        "Só alertarei tokens que passarem em TODOS os filtros."
+    ).format(
+        min_score=MIN_SCORE, min_liq=MIN_LIQUIDITY,
+        min_vol=MIN_VOLUME, min_ratio=MIN_BUY_RATIO,
+        min_buys=MIN_BUYS,
+    ))
     threading.Thread(target=scan_dex,  daemon=True).start()
     threading.Thread(target=scan_pump, daemon=True).start()
     threading.Thread(target=report,    daemon=True).start()

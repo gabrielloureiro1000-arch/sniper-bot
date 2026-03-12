@@ -9,11 +9,11 @@ from flask import Flask
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# FILTROS ULTRA AGRESSIVOS (Abaixe se quiser ainda mais sinais)
-MIN_SCORE     = int(os.getenv("MIN_SCORE", "40"))       
-MIN_LIQUIDITY = int(os.getenv("MIN_LIQUIDITY", "1500")) # Pegar tokens bem no início
-MIN_BUYS_M5   = int(os.getenv("MIN_BUYS_M5", "10"))     # Mínimo de 10 compras nos últimos 5 min
-DEX_INTERVAL  = 3  # Scan super rápido
+# AJUSTE PARA MAIS ALERTAS (Agressividade Máxima)
+MIN_SCORE     = 35        # Baixado para não perder oportunidades iniciais
+MIN_LIQUIDITY = 1000      # Aceita tokens bem no começo da pool
+MIN_BUYS_M5   = 5         # Se tiver 5 compras em 5min, já avaliamos
+DEX_INTERVAL  = 2         # Scan quase em tempo real
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
@@ -29,115 +29,107 @@ def send(msg):
     except Exception as e:
         print(f"Telegram Error: {e}")
 
-# ─── CÁLCULO DE MOMENTUM ──────────────────────────────────────────────────
-def analisar_momentum(pair):
+# ─── ANÁLISE DE PROMESSA (PROMISSOR) ──────────────────────────────────────
+def analisar_promessa(pair):
     score = 0
     razoes = []
     
-    # Extração de dados (foco em 5 minutos)
-    m5_data = pair.get("txns", {}).get("m5", {})
-    buys = m5_data.get("buys", 0)
-    sells = m5_data.get("sells", 0)
+    # Dados de 5 minutos e 1 hora
+    m5 = pair.get("txns", {}).get("m5", {})
+    buys = m5.get("buys", 0)
+    sells = m5.get("sells", 0)
     pc5m = pair.get("priceChange", {}).get("m5", 0)
-    liq = pair.get("liquidity", {}).get("usd", 0)
-    vol_h24 = pair.get("volume", {}).get("h24", 0)
+    pc1h = pair.get("priceChange", {}).get("h1", 0)
     
     ratio = buys / max(sells, 1)
 
-    # 1. ACELERAÇÃO DE PREÇO (Peso 40)
-    if pc5m >= 20:
+    # 1. NOVO VOLUME ENTRANDO (Ouro)
+    if buys > 30:
         score += 40
-        razoes.append(f"🚀 EXPLOSÃO: +{pc5m}% (5m)")
-    elif pc5m >= 5:
+        razoes.append(f"🔥 FOMO DETECTADO: {buys} compras em 5m")
+    elif buys > 10:
         score += 20
-        razoes.append(f"📈 SUBINDO: +{pc5m}% (5m)")
+        razoes.append(f"✅ Volume entrando")
 
-    # 2. PRESSÃO DE COMPRA (Peso 40)
-    if ratio >= 5:
-        score += 40
-        razoes.append(f"💎 COMPRA EXTREMA: {ratio:.1f}x")
-    elif ratio >= 2:
-        score += 20
-        razoes.append(f"✅ Volume de Compra: {ratio:.1f}x")
+    # 2. PREÇO EM ESCADA (Sem dump pesado)
+    if pc5m > 10 and pc5m < 100: # Se subiu muito rápido (>100%), pode ser topo
+        score += 30
+        razoes.append(f"📈 Crescimento Saudável: +{pc5m}%")
+    
+    # 3. DOMINAÇÃO DE COMPRA
+    if ratio > 3:
+        score += 30
+        razoes.append(f"💎 Baleias comprando ({ratio:.1f}x mais que venda)")
 
-    # 3. ATIVIDADE (Peso 20)
-    if buys > 50:
-        score += 20
-        razoes.append(f"🔥 MUITA ATIVIDADE: {buys} trades/5m")
-    elif buys > 20:
-        score += 10
+    if score >= MIN_SCORE:
+        return score, razoes
+    return None, None
 
-    # Sinalizador
-    if score >= 70:
-        sinal = "🟢 COMPRA AGRESSIVA"
-    elif score >= 40:
-        sinal = "🟡 OBSERVANDO MOMENTUM"
-    else:
-        return None, None, None # Descarta se for fraco
-
-    return score, sinal, razoes
-
-# ─── SCANNER PRINCIPAL ─────────────────────────────────────────────────────
+# ─── SCANNER OTIMIZADO ─────────────────────────────────────────────────────
 def scan_dex():
     global seen
-    print("Sniper rodando...")
+    # Endpoint de tokens recentes e com volume na Solana
+    # Mudamos para buscar os pares mais ativos diretamente
+    url = "https://api.dexscreener.com/latest/dex/tokens/solana" 
+    # Alternativa: "https://api.dexscreener.com/latest/dex/search/?q=sol"
+    
+    print("Sniper Agressivo rodando...")
     
     while True:
         try:
-            # Pegando os tokens mais ativos na Solana via DexScreener
-            url = "https://api.dexscreener.com/latest/dex/search/?q=sol"
-            r = requests.get(url, timeout=5)
+            # Usando busca por 'sol' para pegar tudo que é par SOL recente
+            r = requests.get("https://api.dexscreener.com/latest/dex/search/?q=sol", timeout=5)
             if r.status_code != 200: continue
 
             pairs = r.json().get("pairs", [])
-            
+            # Prioriza os que tiveram mudança de preço recente
+            pairs = sorted(pairs, key=lambda x: x.get("priceChange", {}).get("m5", 0), reverse=True)
+
             for pair in pairs:
                 token_addr = pair.get("baseToken", {}).get("address")
                 symbol = pair.get("baseToken", {}).get("symbol", "???")
                 liq = pair.get("liquidity", {}).get("usd", 0)
                 
-                # Filtros Básicos de Segurança e Liquidez
                 if not token_addr or token_addr in seen: continue
                 if liq < MIN_LIQUIDITY: continue
-                if pair.get("txns", {}).get("m5", {}).get("buys", 0) < MIN_BUYS_M5: continue
 
-                score, sinal, razoes = analisar_momentum(pair)
+                score, razoes = analisar_promessa(pair)
 
-                if score and score >= MIN_SCORE:
+                if score:
                     seen.add(token_addr)
                     
-                    # Links de Ação
-                    gmgn = f"https://gmgn.ai/sol/token/{token_addr}"
-                    ds = f"https://dexscreener.com/solana/{token_addr}"
-                    # Link para o bot Trojan (execução mais rápida que existe)
-                    trojan = f"https://t.me/solana_trojan_bot?start=r-user_{token_addr}"
+                    # CORREÇÃO DO LINK GMGN (Usando o formato de visualização direta)
+                    # Adicionado ?chain=sol para forçar o app/site a entender a rede
+                    gm_link = f"https://gmgn.ai/sol/token/{token_addr}?chain=sol"
+                    ds_link = f"https://dexscreener.com/solana/{token_addr}"
+                    
+                    # Trojan para compra instantânea
+                    tj_link = f"https://t.me/solana_trojan_bot?start=r-user_{token_addr}"
 
                     razoes_txt = "\n".join([f"  • {r}" for r in razoes])
                     
                     msg = (
-                        f"{sinal} *${symbol}*\n"
-                        f"🏆 *SCORE: {score}/100*\n\n"
-                        f"*Análise:* \n{razoes_txt}\n\n"
+                        f"🚀 *OPORTUNIDADE DETECTADA: ${symbol}*\n"
+                        f"🏆 *Confiança: {score}/100*\n\n"
+                        f"*Por que entrar:* \n{razoes_txt}\n\n"
                         f"💰 Liquidez: `${liq:,.0f}`\n"
                         f"📊 Vol 24h: `${pair.get('volume', {}).get('h24', 0):,.0f}`\n\n"
-                        f"🔗 [GMGN]({gmgn}) | [DexScreener]({ds})\n"
-                        f"⚡ [COMPRAR AGORA (Trojan)]({trojan})"
+                        f"🔗 [ABRIR NO GMGN]({gm_link})\n"
+                        f"📈 [DexScreener]({ds_link})\n"
+                        f"⚡ [COMPRA RÁPIDA (Trojan Bot)]({tj_link})"
                     )
                     send(msg)
 
         except Exception as e:
-            print(f"Erro no loop: {e}")
+            print(f"Erro: {e}")
         
         time.sleep(DEX_INTERVAL)
 
 @app.route("/")
-def health_check():
-    return f"Sniper Online - Alertados: {len(seen)}"
+def health():
+    return f"Sniper Online - Tokens vistos: {len(seen)}"
 
 if __name__ == "__main__":
-    # Inicia o scanner em uma thread separada
     threading.Thread(target=scan_dex, daemon=True).start()
-    
-    # Rodar o servidor Flask
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

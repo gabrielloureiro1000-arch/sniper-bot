@@ -5,42 +5,50 @@ import requests
 import telebot
 from flask import Flask
 
-# ─── CONFIG ──────────────────────────────
+# ─── CONFIG ─────────────────────────────
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-DEX_INTERVAL = 5
+DEX_INTERVAL = 6
 
 MIN_LIQUIDITY = 2000
-MIN_VOLUME_M5 = 3000
-MIN_BUYS_M5 = 5
-MIN_PRICE_CHANGE = 2
+MIN_VOLUME_M5 = 5000
+MIN_BUYS = 6
+MIN_PRICE_CHANGE = 3
 
 WHALE_BUYS = 8
-WHALE_MIN_AVG = 800
+WHALE_AVG = 900
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
 app = Flask(__name__)
 
 seen = set()
-alerts = 0
 
 monitored_tokens = {}
+
+alerts = 0
 
 # ─── TELEGRAM ───────────────────────────
 
 def send(msg):
+
     global alerts
+
     try:
+
         bot.send_message(
             CHAT_ID,
             msg,
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
+
         alerts += 1
+
     except Exception as e:
+
         print("Telegram error:", e)
 
 # ─── RELATÓRIO 2H ───────────────────────
@@ -54,7 +62,7 @@ def report():
         if not monitored_tokens:
             continue
 
-        report = "📊 *RELATÓRIO 2H DOS SINAIS*\n\n"
+        report_msg = "📊 *RELATÓRIO DE PERFORMANCE (2H)*\n\n"
 
         addresses = ",".join(monitored_tokens.keys())
 
@@ -69,7 +77,7 @@ def report():
 
             pairs = r.json().get("pairs", [])
 
-            prices = {}
+            current = {}
 
             for p in pairs:
 
@@ -77,38 +85,52 @@ def report():
                 price = p.get("priceUsd")
 
                 if addr and price:
-                    prices[addr] = float(price)
+                    current[addr] = float(price)
+
+            positives = 0
+            negatives = 0
 
             for addr, info in monitored_tokens.items():
 
-                if addr not in prices:
+                if addr not in current:
                     continue
 
                 initial = info["price"]
-                current = prices[addr]
+                now = current[addr]
 
-                change = ((current - initial) / initial) * 100
+                change = ((now - initial) / initial) * 100
 
-                emoji = "🚀" if change >= 0 else "🔻"
+                if change >= 0:
+                    emoji = "🚀"
+                    positives += 1
+                else:
+                    emoji = "🔻"
+                    negatives += 1
 
-                report += f"{emoji} *{info['symbol']}* `{change:+.2f}%`\n"
+                report_msg += f"{emoji} *{info['symbol']}* `{change:+.2f}%`\n"
 
-            send(report)
+            report_msg += "\n"
+            report_msg += f"🧠 Sinais enviados: {alerts}\n"
+            report_msg += f"📈 Positivos: {positives}\n"
+            report_msg += f"📉 Negativos: {negatives}"
+
+            send(report_msg)
 
         except Exception as e:
+
             print("Erro relatório:", e)
 
-# ─── SCANNER ────────────────────────────
+# ─── SCANNER PRINCIPAL ──────────────────
 
 def scan():
 
-    print("SNIPER SOLANA ATIVO")
+    print("🚀 SNIPER ATIVO")
 
     while True:
 
         try:
 
-            url = "https://api.dexscreener.com/latest/dex/pairs/solana"
+            url = "https://api.dexscreener.com/latest/dex/search?q=sol"
 
             r = requests.get(url, timeout=10)
 
@@ -120,8 +142,10 @@ def scan():
 
             for pair in pairs:
 
-                token_addr = pair.get("baseToken", {}).get("address")
-                symbol = pair.get("baseToken", {}).get("symbol", "???")
+                token = pair.get("baseToken", {})
+
+                token_addr = token.get("address")
+                symbol = token.get("symbol", "???")
 
                 if not token_addr:
                     continue
@@ -144,15 +168,13 @@ def scan():
 
                 price = float(price)
 
-                # ─── FILTROS ───
-
                 if liquidity < MIN_LIQUIDITY:
                     continue
 
                 if volume_m5 < MIN_VOLUME_M5:
                     continue
 
-                if buys < MIN_BUYS_M5:
+                if buys < MIN_BUYS:
                     continue
 
                 if buys <= sells:
@@ -168,7 +190,7 @@ def scan():
 
                 whale = False
 
-                if buys >= WHALE_BUYS and avg_buy >= WHALE_MIN_AVG:
+                if buys >= WHALE_BUYS and avg_buy >= WHALE_AVG:
                     whale = True
 
                 seen.add(token_addr)
@@ -179,9 +201,7 @@ def scan():
                     "timestamp": time.time()
                 }
 
-                gm_link = f"https://gmgn.ai/sol/token/{token_addr}?chain=sol"
-
-                trojan = f"https://t.me/solana_trojan_bot?start=r-user_{token_addr}"
+                gmgn = f"https://gmgn.ai/sol/token/{token_addr}?chain=sol"
 
                 if whale:
                     header = "🐋 *BALEIAS COMPRANDO*"
@@ -197,30 +217,38 @@ def scan():
                     f"📊 Volume5m `${volume_m5:,.0f}`\n\n"
                     f"🔥 Buys `{buys}`\n"
                     f"📉 Sells `{sells}`\n\n"
-                    f"🔗 [GMGN]({gm_link})\n"
-                    f"⚡ [BUY BOT]({trojan})"
+                    f"🔗 [ABRIR NO GMGN]({gmgn})"
                 )
 
                 send(msg)
 
         except Exception as e:
+
             print("Erro scanner:", e)
 
         time.sleep(DEX_INTERVAL)
 
-# ─── HEALTH ─────────────────────────────
+# ─── HEALTHCHECK ────────────────────────
 
 @app.route("/")
 def health():
-    return "SNIPER ONLINE"
+    return "BOT ONLINE"
 
 # ─── START ──────────────────────────────
 
+def start():
+
+    t1 = threading.Thread(target=scan)
+    t1.daemon = True
+    t1.start()
+
+    t2 = threading.Thread(target=report)
+    t2.daemon = True
+    t2.start()
+
 if __name__ == "__main__":
 
-    threading.Thread(target=scan, daemon=True).start()
-
-    threading.Thread(target=report, daemon=True).start()
+    start()
 
     port = int(os.environ.get("PORT", 10000))
 

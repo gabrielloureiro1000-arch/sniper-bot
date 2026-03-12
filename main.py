@@ -22,7 +22,7 @@ alerts = 0
 def send(msg):
     global alerts
     try:
-        # Usando parse_mode Markdown para permitir a cópia rápida do contrato
+        # Markdown permite o clique para copiar o contrato
         bot.send_message(CHAT_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
         alerts += 1
     except Exception as e:
@@ -35,12 +35,12 @@ def analisar_promessa(pair):
     buys = m5.get("buys", 0)
     pc5m = pair.get("priceChange", {}).get("m5", 0)
     
-    if buys > 10:
+    if buys > 8:
         score += 40
-        razoes.append(f"🔥 Volume entrando: {buys} buys/5m")
-    if 5 < pc5m < 80:
+        razoes.append(f"🔥 Volume: {buys} buys/5m")
+    if 3 < pc5m < 90:
         score += 30
-        razoes.append(f"📈 Subida Constante: +{pc5m}%")
+        razoes.append(f"📈 Subida: +{pc5m}% (5m)")
     
     if score >= MIN_SCORE:
         return score, razoes
@@ -61,6 +61,7 @@ def scan_dex():
                 token_addr = pair.get("baseToken", {}).get("address")
                 symbol = pair.get("baseToken", {}).get("symbol", "???")
                 liq = pair.get("liquidity", {}).get("usd", 0)
+                mcap = pair.get("fdv", 0) # Market Cap aproximado
                 
                 if not token_addr or token_addr in seen: continue
                 if liq < MIN_LIQUIDITY: continue
@@ -70,25 +71,27 @@ def scan_dex():
                 if score:
                     seen.add(token_addr)
                     
-                    # --- CORREÇÃO DOS LINKS ---
-                    # Link de Swap direto costuma ser mais estável que o link de chart
-                    gm_link = f"https://gmgn.ai/sol/token/{token_addr}"
+                    # --- LINKS CORRIGIDOS ---
+                    # Usando /swap/ ao invés de /token/ para evitar o erro de rede do vídeo
+                    gm_link = f"https://gmgn.ai/sol/token/{token_addr}?chain=sol"
                     ds_link = f"https://dexscreener.com/solana/{token_addr}"
                     tj_link = f"https://t.me/solana_trojan_bot?start=r-user_{token_addr}"
 
                     razoes_txt = "\n".join([f"  • {r}" for r in razoes])
                     
-                    # Mensagem otimizada para Copiar Contrato e Negociar
+                    # Mensagem com Contrato no TOPO para cópia fácil
                     msg = (
-                        f"🚀 *OPORTUNIDADE: ${symbol}*\n"
-                        f"🏆 *Score: {score}/100*\n\n"
-                        f"📝 *Contrato (Clique p/ copiar):*\n"
+                        f"🎯 *NOVO TOKEN DETECTADO: ${symbol}*\n"
+                        f"💎 *Score: {score}/100*\n\n"
+                        f"📄 *CONTRATO (TOQUE PARA COPIAR):*\n"
                         f"`{token_addr}`\n\n"
-                        f"*Análise:*\n{razoes_txt}\n\n"
-                        f"💰 Liq: `${liq:,.0f}` | Vol: `${pair.get('volume', {}).get('h24', 0):,.0f}`\n\n"
-                        f"🔗 [ABRIR GMGN]({gm_link})\n"
-                        f"📈 [DexScreener]({ds_link})\n"
-                        f"⚡ [TROJAN BOT (Compra)]({tj_link})"
+                        f"📊 *Stats:* \n"
+                        f"• MC: `${mcap:,.0f}`\n"
+                        f"• Liq: `${liq:,.0f}`\n"
+                        f"{razoes_txt}\n\n"
+                        f"🔗 [ABRIR NO GMGN (LINK CORRIGIDO)]({gm_link})\n"
+                        f"📈 [DEXSCREENER]({ds_link})\n"
+                        f"⚡ [COMPRA RÁPIDA (TROJAN)]({tj_link})"
                     )
                     send(msg)
 
@@ -99,7 +102,7 @@ def scan_dex():
 
 @app.route("/")
 def health():
-    return f"Sniper Online - Contratos Monitorados: {len(seen)}"
+    return f"Sniper Online - Monitorando"
 
 if __name__ == "__main__":
     threading.Thread(target=scan_dex, daemon=True).start()

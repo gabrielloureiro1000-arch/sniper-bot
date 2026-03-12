@@ -16,7 +16,7 @@ DEX_INTERVAL  = 3
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
 
-# Dicionário para rastrear tokens: { endereço: {"symbol": str, "price_at_alert": float, "timestamp": float} }
+# Rastreamento: { endereço: {"symbol": str, "price_at_alert": float, "timestamp": float} }
 monitored_tokens = {}
 seen = set()
 alerts = 0
@@ -29,16 +29,16 @@ def send(msg):
     except Exception as e:
         print(f"Telegram Error: {e}")
 
-# ─── MONITORAMENTO DE PERFORMANCE (A CADA 2 HORAS) ────────────────────────
+# ─── MONITORAMENTO DE PERFORMANCE (2 EM 2 HORAS) ──────────────────────────
 def report_performance():
     while True:
-        time.sleep(7200) # 2 horas
+        time.sleep(7200) # 2 horas exatas
         if not monitored_tokens:
             continue
             
-        report_msg = "📊 *RELATÓRIO DE PERFORMANCE (2H)*\n\n"
+        report_msg = "📊 *RELATÓRIO DE PERFORMANCE (Últimas 2h)*\n\n"
         
-        # Fazemos uma busca em massa no DexScreener para atualizar os preços
+        # Busca preços atuais no DexScreener
         addresses = ",".join(monitored_tokens.keys())
         try:
             url = f"https://api.dexscreener.com/latest/dex/tokens/{addresses}"
@@ -46,7 +46,7 @@ def report_performance():
             if r.status_code == 200:
                 data = r.json().get("pairs", [])
                 
-                # Mapear preços atuais
+                # Mapear preços atuais por endereço
                 current_prices = {p['baseToken']['address']: float(p['priceUsd']) for p in data if 'priceUsd' in p}
                 
                 for addr, info in list(monitored_tokens.items()):
@@ -56,9 +56,9 @@ def report_performance():
                         change = ((p_current - p_initial) / p_initial) * 100
                         
                         emoji = "🚀" if change > 0 else "🔻"
-                        report_msg += f"{emoji} *{info['symbol']}*: `{change:+.2f}%` desde o alerta\n"
+                        report_msg += f"{emoji} *{info['symbol']}*: `{change:+.2f}%` desde o sinal\n"
                     
-                    # Limpa da memória tokens com mais de 24h para não pesar
+                    # Remove tokens do monitoramento após 24h para não poluir
                     if time.time() - info["timestamp"] > 86400:
                         monitored_tokens.pop(addr)
                         
@@ -69,6 +69,8 @@ def report_performance():
 # ─── SCANNER PRINCIPAL ─────────────────────────────────────────────────────
 def scan_dex():
     global seen
+    print("Sniper Ativo - Links Corrigidos")
+    
     while True:
         try:
             r = requests.get("https://api.dexscreener.com/latest/dex/search/?q=sol", timeout=5)
@@ -79,26 +81,27 @@ def scan_dex():
                 token_addr = pair.get("baseToken", {}).get("address")
                 symbol = pair.get("baseToken", {}).get("symbol", "???")
                 liq = pair.get("liquidity", {}).get("usd", 0)
-                price_usd = float(pair.get("priceUsd", 0))
+                price_usd = float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else 0
                 
                 if not token_addr or token_addr in seen: continue
                 if liq < MIN_LIQUIDITY: continue
 
-                # Filtro rápido de momentum
+                # Filtro de Momentum (M5)
                 m5_buys = pair.get("txns", {}).get("m5", {}).get("buys", 0)
-                if m5_buys > 10:
+                if m5_buys > 12: # Só avisa se tiver volume real agora
                     seen.add(token_addr)
                     
-                    # Adiciona ao monitoramento de 2 horas
+                    # Salva para o relatório de 2h
                     monitored_tokens[token_addr] = {
                         "symbol": symbol,
                         "price_at_alert": price_usd,
                         "timestamp": time.time()
                     }
                     
-                    # --- LINK GMGN CORRIGIDO (SEARCH MODE) ---
-                    # Esse formato força o GMGN a buscar o contrato na hora, evitando o erro de página
+                    # --- SOLUÇÃO PARA O LINK GMGN ---
+                    # O formato abaixo força o carregamento da busca, evitando o erro de rede
                     gm_link = f"https://gmgn.ai/sol/token/{token_addr}"
+                    # Link alternativo via Trojan Bot (Mais rápido para mobile)
                     tj_link = f"https://t.me/solana_trojan_bot?start=r-user_{token_addr}"
 
                     msg = (
@@ -106,8 +109,8 @@ def scan_dex():
                         f"📄 *CONTRATO:* \n`{token_addr}`\n\n"
                         f"💰 Preço inicial: `${price_usd:.8f}`\n"
                         f"💧 Liquidez: `${liq:,.0f}`\n\n"
-                        f"🔗 [ABRIR NO GMGN AGORA]({gm_link})\n"
-                        f"⚡ [COMPRAR VIA TROJAN BOT]({tj_link})"
+                        f"🔗 [ABRIR NO GMGN AGORA]({gm_link})\n\n"
+                        f"⚡ [COMPRA DIRETA (Trojan Bot)]({tj_link})"
                     )
                     send(msg)
 

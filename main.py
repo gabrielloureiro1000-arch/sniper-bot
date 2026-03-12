@@ -1,4 +1,3 @@
-```python
 import os
 import time
 import threading
@@ -6,27 +5,24 @@ import requests
 import telebot
 from flask import Flask
 
-# ───── CONFIGURAÇÃO ─────────────────────────────
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 DEX_INTERVAL = 5
 
 MIN_LIQUIDITY = 1500
-MIN_VOLUME_M5 = 2000
-MIN_BUYS = 4
+MIN_VOLUME = 4000
+MIN_BUYS = 8
+WHALE_VOLUME = 20000
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 app = Flask(__name__)
 
-seen = set()
+seen_tokens = set()
 alerts = 0
 
-monitored_tokens = {}
-
-# ───── TELEGRAM ─────────────────────────────────
+monitored = {}
 
 def send(msg):
 
@@ -45,22 +41,21 @@ def send(msg):
 
     except Exception as e:
 
-        print("Telegram error:", e)
+        print("telegram error", e)
 
-# ───── RELATÓRIO A CADA 2H ─────────────────────
 
-def report():
+def performance_report():
 
     while True:
 
         time.sleep(7200)
 
-        if not monitored_tokens:
+        if not monitored:
             continue
 
-        report_msg = "📊 *RELATÓRIO DE PERFORMANCE (2H)*\n\n"
+        report = "📊 RELATÓRIO 2H\n\n"
 
-        addresses = ",".join(monitored_tokens.keys())
+        addresses = ",".join(monitored.keys())
 
         try:
 
@@ -68,14 +63,11 @@ def report():
 
             r = requests.get(url, timeout=10)
 
-            if r.status_code != 200:
-                continue
-
-            pairs = r.json().get("pairs", [])
+            data = r.json().get("pairs", [])
 
             prices = {}
 
-            for p in pairs:
+            for p in data:
 
                 addr = p.get("baseToken", {}).get("address")
                 price = p.get("priceUsd")
@@ -83,10 +75,7 @@ def report():
                 if addr and price:
                     prices[addr] = float(price)
 
-            positives = 0
-            negatives = 0
-
-            for addr, info in monitored_tokens.items():
+            for addr, info in monitored.items():
 
                 if addr not in prices:
                     continue
@@ -96,43 +85,30 @@ def report():
 
                 change = ((current - initial) / initial) * 100
 
-                if change >= 0:
-                    emoji = "🚀"
-                    positives += 1
-                else:
-                    emoji = "🔻"
-                    negatives += 1
+                emoji = "🚀" if change >= 0 else "🔻"
 
-                report_msg += f"{emoji} *{info['symbol']}* `{change:+.2f}%`\n"
+                report += f"{emoji} {info['symbol']} {change:+.2f}%\n"
 
-            report_msg += "\n"
-            report_msg += f"🧠 Sinais enviados: {alerts}\n"
-            report_msg += f"📈 Positivos: {positives}\n"
-            report_msg += f"📉 Negativos: {negatives}"
+            report += f"\n📨 alertas enviados: {alerts}"
 
-            send(report_msg)
+            send(report)
 
         except Exception as e:
 
-            print("Erro relatório:", e)
+            print("report error", e)
 
-# ───── SCANNER PRINCIPAL ───────────────────────
 
 def scan():
 
-    print("🚀 SCANNER SOLANA ATIVO")
+    print("🚀 MEMECOIN SNIPER ATIVO")
 
     while True:
 
         try:
 
-            url = "https://api.dexscreener.com/latest/dex/pairs/solana"
+            url = "https://api.dexscreener.com/latest/dex/search?q=sol"
 
             r = requests.get(url, timeout=10)
-
-            if r.status_code != 200:
-                time.sleep(DEX_INTERVAL)
-                continue
 
             pairs = r.json().get("pairs", [])
 
@@ -140,13 +116,13 @@ def scan():
 
                 token = pair.get("baseToken", {})
 
-                token_addr = token.get("address")
+                addr = token.get("address")
                 symbol = token.get("symbol", "???")
 
-                if not token_addr:
+                if not addr:
                     continue
 
-                if token_addr in seen:
+                if addr in seen_tokens:
                     continue
 
                 liquidity = pair.get("liquidity", {}).get("usd", 0)
@@ -162,12 +138,10 @@ def scan():
 
                 price = float(price)
 
-                # FILTROS
-
                 if liquidity < MIN_LIQUIDITY:
                     continue
 
-                if volume < MIN_VOLUME_M5:
+                if volume < MIN_VOLUME:
                     continue
 
                 if buys < MIN_BUYS:
@@ -176,43 +150,48 @@ def scan():
                 if buys <= sells:
                     continue
 
-                seen.add(token_addr)
+                whale = False
 
-                monitored_tokens[token_addr] = {
+                if volume > WHALE_VOLUME:
+                    whale = True
+
+                seen_tokens.add(addr)
+
+                monitored[addr] = {
                     "symbol": symbol,
                     "price": price,
                     "timestamp": time.time()
                 }
 
-                gmgn = f"https://gmgn.ai/sol/token/{token_addr}?chain=sol"
+                gmgn = f"https://gmgn.ai/sol/token/{addr}"
+
+                emoji = "🐋" if whale else "🚀"
 
                 msg = (
-                    f"🚀 *TOKEN COMPRADO AGORA*\n\n"
-                    f"💎 *{symbol}*\n\n"
-                    f"`{token_addr}`\n\n"
-                    f"💰 Preço `${price:.8f}`\n"
-                    f"💧 Liquidez `${liquidity:,.0f}`\n"
-                    f"📊 Volume5m `${volume:,.0f}`\n\n"
-                    f"🔥 Buys `{buys}`\n"
-                    f"📉 Sells `{sells}`\n\n"
-                    f"🔗 [ABRIR GMGN]({gmgn})"
+                    f"{emoji} TOKEN EM ACUMULAÇÃO\n\n"
+                    f"💎 {symbol}\n\n"
+                    f"`{addr}`\n\n"
+                    f"💰 preço ${price:.8f}\n"
+                    f"💧 liquidez ${liquidity:,.0f}\n"
+                    f"📊 volume5m ${volume:,.0f}\n\n"
+                    f"🔥 buys {buys}\n"
+                    f"📉 sells {sells}\n\n"
+                    f"🔗 GMGN\n{gmgn}"
                 )
 
                 send(msg)
 
         except Exception as e:
 
-            print("Erro scanner:", e)
+            print("scan error", e)
 
         time.sleep(DEX_INTERVAL)
 
-# ───── HEALTHCHECK ─────────────────────────────
 
 @app.route("/")
 def health():
     return "BOT ONLINE"
 
-# ───── START ───────────────────────────────────
 
 def start():
 
@@ -220,9 +199,10 @@ def start():
     t1.daemon = True
     t1.start()
 
-    t2 = threading.Thread(target=report)
+    t2 = threading.Thread(target=performance_report)
     t2.daemon = True
     t2.start()
+
 
 if __name__ == "__main__":
 
@@ -231,4 +211,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
 
     app.run(host="0.0.0.0", port=port)
-```

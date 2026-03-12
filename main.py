@@ -1,3 +1,4 @@
+```python
 import os
 import time
 import threading
@@ -5,32 +6,27 @@ import requests
 import telebot
 from flask import Flask
 
-# ─── CONFIG ─────────────────────────────
+# ───── CONFIGURAÇÃO ─────────────────────────────
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-DEX_INTERVAL = 6
+DEX_INTERVAL = 5
 
-MIN_LIQUIDITY = 2000
-MIN_VOLUME_M5 = 5000
-MIN_BUYS = 6
-MIN_PRICE_CHANGE = 3
-
-WHALE_BUYS = 8
-WHALE_AVG = 900
+MIN_LIQUIDITY = 1500
+MIN_VOLUME_M5 = 2000
+MIN_BUYS = 4
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 app = Flask(__name__)
 
 seen = set()
+alerts = 0
 
 monitored_tokens = {}
 
-alerts = 0
-
-# ─── TELEGRAM ───────────────────────────
+# ───── TELEGRAM ─────────────────────────────────
 
 def send(msg):
 
@@ -51,7 +47,7 @@ def send(msg):
 
         print("Telegram error:", e)
 
-# ─── RELATÓRIO 2H ───────────────────────
+# ───── RELATÓRIO A CADA 2H ─────────────────────
 
 def report():
 
@@ -77,7 +73,7 @@ def report():
 
             pairs = r.json().get("pairs", [])
 
-            current = {}
+            prices = {}
 
             for p in pairs:
 
@@ -85,20 +81,20 @@ def report():
                 price = p.get("priceUsd")
 
                 if addr and price:
-                    current[addr] = float(price)
+                    prices[addr] = float(price)
 
             positives = 0
             negatives = 0
 
             for addr, info in monitored_tokens.items():
 
-                if addr not in current:
+                if addr not in prices:
                     continue
 
                 initial = info["price"]
-                now = current[addr]
+                current = prices[addr]
 
-                change = ((now - initial) / initial) * 100
+                change = ((current - initial) / initial) * 100
 
                 if change >= 0:
                     emoji = "🚀"
@@ -120,17 +116,17 @@ def report():
 
             print("Erro relatório:", e)
 
-# ─── SCANNER PRINCIPAL ──────────────────
+# ───── SCANNER PRINCIPAL ───────────────────────
 
 def scan():
 
-    print("🚀 SNIPER ATIVO")
+    print("🚀 SCANNER SOLANA ATIVO")
 
     while True:
 
         try:
 
-            url = "https://api.dexscreener.com/latest/dex/search?q=sol"
+            url = "https://api.dexscreener.com/latest/dex/pairs/solana"
 
             r = requests.get(url, timeout=10)
 
@@ -154,12 +150,10 @@ def scan():
                     continue
 
                 liquidity = pair.get("liquidity", {}).get("usd", 0)
-                volume_m5 = pair.get("volume", {}).get("m5", 0)
+                volume = pair.get("volume", {}).get("m5", 0)
 
                 buys = pair.get("txns", {}).get("m5", {}).get("buys", 0)
                 sells = pair.get("txns", {}).get("m5", {}).get("sells", 0)
-
-                price_change = pair.get("priceChange", {}).get("m5", 0)
 
                 price = pair.get("priceUsd")
 
@@ -168,10 +162,12 @@ def scan():
 
                 price = float(price)
 
+                # FILTROS
+
                 if liquidity < MIN_LIQUIDITY:
                     continue
 
-                if volume_m5 < MIN_VOLUME_M5:
+                if volume < MIN_VOLUME_M5:
                     continue
 
                 if buys < MIN_BUYS:
@@ -179,19 +175,6 @@ def scan():
 
                 if buys <= sells:
                     continue
-
-                if price_change < MIN_PRICE_CHANGE:
-                    continue
-
-                avg_buy = 0
-
-                if buys > 0:
-                    avg_buy = volume_m5 / buys
-
-                whale = False
-
-                if buys >= WHALE_BUYS and avg_buy >= WHALE_AVG:
-                    whale = True
 
                 seen.add(token_addr)
 
@@ -203,21 +186,16 @@ def scan():
 
                 gmgn = f"https://gmgn.ai/sol/token/{token_addr}?chain=sol"
 
-                if whale:
-                    header = "🐋 *BALEIAS COMPRANDO*"
-                else:
-                    header = "🚀 *TOKEN EM MOVIMENTO*"
-
                 msg = (
-                    f"{header}\n\n"
+                    f"🚀 *TOKEN COMPRADO AGORA*\n\n"
                     f"💎 *{symbol}*\n\n"
                     f"`{token_addr}`\n\n"
                     f"💰 Preço `${price:.8f}`\n"
                     f"💧 Liquidez `${liquidity:,.0f}`\n"
-                    f"📊 Volume5m `${volume_m5:,.0f}`\n\n"
+                    f"📊 Volume5m `${volume:,.0f}`\n\n"
                     f"🔥 Buys `{buys}`\n"
                     f"📉 Sells `{sells}`\n\n"
-                    f"🔗 [ABRIR NO GMGN]({gmgn})"
+                    f"🔗 [ABRIR GMGN]({gmgn})"
                 )
 
                 send(msg)
@@ -228,13 +206,13 @@ def scan():
 
         time.sleep(DEX_INTERVAL)
 
-# ─── HEALTHCHECK ────────────────────────
+# ───── HEALTHCHECK ─────────────────────────────
 
 @app.route("/")
 def health():
     return "BOT ONLINE"
 
-# ─── START ──────────────────────────────
+# ───── START ───────────────────────────────────
 
 def start():
 
@@ -253,3 +231,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
 
     app.run(host="0.0.0.0", port=port)
+```

@@ -10,10 +10,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 DEX_INTERVAL = 2 
 
-# FILTROS PARA TOKENS PROMISSORES COM BALEIAS
-MIN_LIQUIDITY = 2000       # Liquidez mínima para não ser golpe imediato
-MIN_WHALE_BUYS = 8         # Pelo menos 8 compras significativas em 5min
-MIN_VOLUME_M5 = 3000       # Volume mínimo de $3k nos últimos 5min para indicar hype
+# FILTROS RECALIBRADOS PARA PROMISSORES (BALEIAS EM FORMAÇÃO)
+MIN_LIQUIDITY = 1200       # Baixado para pegar o início do pump
+MIN_WHALE_BUYS = 3         # Começa a avisar com 3, mas sinaliza força se tiver +8
+MIN_VOLUME_M5 = 1500       # Volume mínimo inicial
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
@@ -32,39 +32,42 @@ def performance_report():
     while True:
         time.sleep(7200)
         if not monitored_prices: continue
-        report = "📊 *RELATÓRIO DE BALEIAS (2H)*\n\n"
+        report = "📊 *BALANÇO DE PERFORMANCE (2H)*\n\n"
         try:
             addrs = list(monitored_prices.keys())
             for i in range(0, len(addrs), 30):
                 batch = ",".join(addrs[i:i+30])
                 url = f"https://api.dexscreener.com/latest/dex/tokens/{batch}"
                 r = requests.get(url, timeout=10)
-                pairs = r.json().get("pairs", [])
-                prices = {p.get("baseToken", {}).get("address"): float(p.get("priceUsd", 0)) for p in pairs}
+                data = r.json()
+                pairs = data.get("pairs", []) if data.get("pairs") else []
+                
+                current_prices = {p.get("baseToken", {}).get("address"): float(p.get("priceUsd", 0)) for p in pairs}
+
                 for addr in addrs[i:i+30]:
-                    data = monitored_prices[addr]
-                    initial = data["price"]
-                    current = prices.get(addr, 0)
+                    info = monitored_prices[addr]
+                    initial = info["price"]
+                    current = current_prices.get(addr, 0)
                     if current > 0:
                         change = ((current - initial) / initial) * 100
-                        report += f"{'🚀' if change >= 0 else '🔻'} *{data['symbol']}*: `{change:+.2f}%` desde o sinal\n"
+                        emoji = "🚀" if change >= 0 else "🔻"
+                        report += f"{emoji} *{info['symbol']}*: `{change:+.2f}%` (Entrada: {initial:.8f})\n"
             send(report)
         except Exception as e:
-            print(f"Erro Relatório: {e}")
+            print(f"Erro Report: {e}")
 
 # --- SCANNER WHALE TRACKER ---
 def scan():
-    print("🐋 BUSCANDO RASTRO DAS BALEIAS NA SOLANA...")
-    send("🐋 *Whale Hunter Ativo:* Monitorando acúmulo de baleias...")
+    print("🐋 WHALE HUNTER V3 INICIADO...")
+    send("🚀 *Bot Online:* Monitorando Baleias e Tokens Promissores na Solana!")
     
     while True:
         try:
-            # Busca tokens com volume e atividade na Solana
+            # Busca ampliada
             r = requests.get("https://api.dexscreener.com/latest/dex/search?q=solana", timeout=10)
             if r.status_code != 200: continue
             
             pairs = r.json().get("pairs", [])
-
             for pair in pairs:
                 if pair.get("chainId") != "solana": continue
                 
@@ -76,28 +79,34 @@ def scan():
                 liq = pair.get("liquidity", {}).get("usd", 0)
                 vol5m = pair.get("volume", {}).get("m5", 0)
                 buys5m = pair.get("txns", {}).get("m5", {}).get("buys", 0)
-                price = float(pair.get("priceUsd", 0))
+                price_usd = pair.get("priceUsd")
+                
+                if not price_usd: continue
+                price = float(price_usd)
 
-                # FILTRO DE BALEIAS: Alta liquidez + Volume alto + Muitas compras
-                if liq < MIN_LIQUIDITY: continue
-                if buys5m < MIN_WHALE_BUYS: continue
-                if vol5m < MIN_VOLUME_M5: continue
+                # FILTRO DE BALEIA/PROMISSOR
+                if liq < MIN_LIQUIDITY or buys5m < MIN_WHALE_BUYS or vol5m < MIN_VOLUME_M5:
+                    continue
 
                 seen_tokens.add(addr)
                 monitored_prices[addr] = {"symbol": symbol, "price": price}
 
-                # LINK GMGN OTIMIZADO (Foca na atividade para você ver as baleias)
+                # Tags de Força
+                whale_tag = "🐋 BALEIA DETECTADA" if buys5m >= 8 else "📈 ACUMULAÇÃO INICIAL"
+                
+                # Links de Ação Rápida
                 gmgn_url = f"https://gmgn.ai/sol/token/{addr}"
+                trojan_url = f"https://t.me/solana_trojan_bot?start=r-user_{addr}"
 
                 msg = (
-                    f"🐋 *BALEIAS DETECTADAS EM: ${symbol}*\n"
-                    f"🔥 *Sinal Promissor - Alta Atividade*\n\n"
-                    f"📄 ` {addr} `\n\n"
+                    f"{whale_tag}\n"
+                    f"💎 *Ativo:* ${symbol}\n\n"
+                    f"📄 *CA:* `{addr}`\n\n"
                     f"💰 Preço: `${price:.10f}`\n"
-                    f"💧 Liquidez: `${liq:,.0f}`\n"
-                    f"📊 Volume 5m: `${vol5m:,.0f}`\n"
-                    f"📈 Compras Recentes: `{buys5m}` baleias/grandes trades\n\n"
-                    f"🔗 [ABRIR NO GMGN (VER ATIVIDADE)]({gmgn_url})"
+                    f"💧 Liq: `${liq:,.0f}` | 📊 Vol 5m: `${vol5m:,.0f}`\n"
+                    f"🔥 Compras: `{buys5m} trades (5m)`\n\n"
+                    f"🔗 [ANALISAR NO GMGN]({gmgn_url})\n"
+                    f"⚡ [COMPRAR NO TROJAN (RÁPIDO)]({trojan_url})"
                 )
                 send(msg)
 

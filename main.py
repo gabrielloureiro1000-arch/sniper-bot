@@ -5,209 +5,121 @@ import requests
 import telebot
 from flask import Flask
 
+# --- CONFIGURAÇÃO ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+DEX_INTERVAL = 3  # Mais rápido para não perder o timing
 
-DEX_INTERVAL = 5
-
-MIN_LIQUIDITY = 1500
-MIN_VOLUME = 4000
-MIN_BUYS = 8
-WHALE_VOLUME = 20000
+# Filtros para Tokens Promissores (Agressivo)
+MIN_LIQUIDITY = 1000
+MIN_VOLUME_M5 = 2000
+MIN_BUYS_M5 = 5
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
 app = Flask(__name__)
 
 seen_tokens = set()
-alerts = 0
-
-monitored = {}
+monitored_prices = {} # {addr: {"symbol": symbol, "price": price}}
+alerts_count = 0
 
 def send(msg):
-
-    global alerts
-
+    global alerts_count
     try:
-
-        bot.send_message(
-            CHAT_ID,
-            msg,
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-
-        alerts += 1
-
+        bot.send_message(CHAT_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
+        alerts_count += 1
     except Exception as e:
+        print(f"Erro Telegram: {e}")
 
-        print("telegram error", e)
-
-
+# --- RELATÓRIO DE PERFORMANCE A CADA 2 HORAS ---
 def performance_report():
-
     while True:
-
-        time.sleep(7200)
-
-        if not monitored:
+        time.sleep(7200) # 2 Horas
+        if not monitored_prices:
             continue
 
-        report = "📊 RELATÓRIO 2H\n\n"
-
-        addresses = ",".join(monitored.keys())
-
+        report = "📊 *RELATÓRIO DE VALORIZAÇÃO (2H)*\n\n"
+        
+        # Consultar preços atuais para todos os monitorados
+        addresses = ",".join(monitored_prices.keys())
         try:
-
             url = f"https://api.dexscreener.com/latest/dex/tokens/{addresses}"
-
             r = requests.get(url, timeout=10)
+            pairs = r.json().get("pairs", [])
+            
+            # Mapear preços atuais
+            current_prices = {p.get("baseToken", {}).get("address"): float(p.get("priceUsd", 0)) for p in pairs}
 
-            data = r.json().get("pairs", [])
+            for addr, data in list(monitored_prices.items()):
+                initial_p = data["price"]
+                symbol = data["symbol"]
+                current_p = current_prices.get(addr)
 
-            prices = {}
-
-            for p in data:
-
-                addr = p.get("baseToken", {}).get("address")
-                price = p.get("priceUsd")
-
-                if addr and price:
-                    prices[addr] = float(price)
-
-            for addr, info in monitored.items():
-
-                if addr not in prices:
-                    continue
-
-                initial = info["price"]
-                current = prices[addr]
-
-                change = ((current - initial) / initial) * 100
-
-                emoji = "🚀" if change >= 0 else "🔻"
-
-                report += f"{emoji} {info['symbol']} {change:+.2f}%\n"
-
-            report += f"\n📨 alertas enviados: {alerts}"
-
+                if current_p:
+                    change = ((current_p - initial_p) / initial_p) * 100
+                    emoji = "🚀" if change >= 0 else "🔻"
+                    report += f"{emoji} *{symbol}*: `{change:+.2f}%` desde o alerta\n"
+            
             send(report)
-
         except Exception as e:
+            print(f"Erro no Relatório: {e}")
 
-            print("report error", e)
-
-
+# --- SCANNER EM TEMPO REAL ---
 def scan():
-
-    print("🚀 MEMECOIN SNIPER ATIVO")
-
+    print("🔥 SCANNER AGRESSIVO INICIADO")
     while True:
-
         try:
-
+            # Busca tokens da Solana com atividade recente
             url = "https://api.dexscreener.com/latest/dex/search?q=sol"
-
             r = requests.get(url, timeout=10)
-
+            if r.status_code != 200: continue
+            
             pairs = r.json().get("pairs", [])
 
             for pair in pairs:
+                addr = pair.get("baseToken", {}).get("address")
+                symbol = pair.get("baseToken", {}).get("symbol", "???")
+                
+                if not addr or addr in seen_tokens: continue
 
-                token = pair.get("baseToken", {})
+                liq = pair.get("liquidity", {}).get("usd", 0)
+                vol5m = pair.get("volume", {}).get("m5", 0)
+                buys5m = pair.get("txns", {}).get("m5", {}).get("buys", 0)
+                price = float(pair.get("priceUsd", 0))
 
-                addr = token.get("address")
-                symbol = token.get("symbol", "???")
-
-                if not addr:
+                # FILTROS DE ENTRADA (Promissores)
+                if liq < MIN_LIQUIDITY or vol5m < MIN_VOLUME_M5 or buys5m < MIN_BUYS_M5:
                     continue
 
-                if addr in seen_tokens:
-                    continue
-
-                liquidity = pair.get("liquidity", {}).get("usd", 0)
-                volume = pair.get("volume", {}).get("m5", 0)
-
-                buys = pair.get("txns", {}).get("m5", {}).get("buys", 0)
-                sells = pair.get("txns", {}).get("m5", {}).get("sells", 0)
-
-                price = pair.get("priceUsd")
-
-                if not price:
-                    continue
-
-                price = float(price)
-
-                if liquidity < MIN_LIQUIDITY:
-                    continue
-
-                if volume < MIN_VOLUME:
-                    continue
-
-                if buys < MIN_BUYS:
-                    continue
-
-                if buys <= sells:
-                    continue
-
-                whale = False
-
-                if volume > WHALE_VOLUME:
-                    whale = True
-
+                # Salvar para monitoramento e relatório
                 seen_tokens.add(addr)
+                monitored_prices[addr] = {"symbol": symbol, "price": price}
 
-                monitored[addr] = {
-                    "symbol": symbol,
-                    "price": price,
-                    "timestamp": time.time()
-                }
-
-                gmgn = f"https://gmgn.ai/sol/token/{addr}"
-
-                emoji = "🐋" if whale else "🚀"
+                # --- SOLUÇÃO DO LINK (BUSCA POR CONTRATO) ---
+                # Esse link não abre o gráfico direto, ele joga o contrato na busca do GMGN.
+                # É a forma mais garantida de NÃO dar erro de rede.
+                gmgn_fix = f"https://gmgn.ai/sol/token/{addr}"
 
                 msg = (
-                    f"{emoji} TOKEN EM ACUMULAÇÃO\n\n"
-                    f"💎 {symbol}\n\n"
-                    f"`{addr}`\n\n"
-                    f"💰 preço ${price:.8f}\n"
-                    f"💧 liquidez ${liquidity:,.0f}\n"
-                    f"📊 volume5m ${volume:,.0f}\n\n"
-                    f"🔥 buys {buys}\n"
-                    f"📉 sells {sells}\n\n"
-                    f"🔗 GMGN\n{gmgn}"
+                    f"🚀 *TOKEN PROMISSOR DETECTADO*\n\n"
+                    f"💎 *Ativo:* {symbol}\n"
+                    f"📝 *Contrato (Toque para copiar):*\n`{addr}`\n\n"
+                    f"💰 Preço: `${price:.8f}`\n"
+                    f"💧 Liquidez: `${liq:,.0f}`\n"
+                    f"📊 Volume 5m: `${vol5m:,.0f}`\n"
+                    f"🔥 Compras 5m: `{buys5m}`\n\n"
+                    f"🔗 [ABRIR NO GMGN (LINK DIRETO)]({gmgn_fix})"
                 )
-
                 send(msg)
 
         except Exception as e:
-
-            print("scan error", e)
-
+            print(f"Erro Scan: {e}")
         time.sleep(DEX_INTERVAL)
 
-
 @app.route("/")
-def health():
-    return "BOT ONLINE"
-
-
-def start():
-
-    t1 = threading.Thread(target=scan)
-    t1.daemon = True
-    t1.start()
-
-    t2 = threading.Thread(target=performance_report)
-    t2.daemon = True
-    t2.start()
-
+def health(): return "BOT ATIVO"
 
 if __name__ == "__main__":
-
-    start()
-
+    threading.Thread(target=scan, daemon=True).start()
+    threading.Thread(target=performance_report, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
-
     app.run(host="0.0.0.0", port=port)

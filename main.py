@@ -105,4 +105,27 @@ def scan():
                 monitored_prices[addr] = {"symbol": symbol, "price": price}
 
                 # Link de busca direta para evitar erro de rede
-                gmgn_fix = f"https://gm
+                gmgn_fix = f"https://gmgn.ai/sol/token/{addr}"
+
+                msg = (
+                    f"✨ *LANÇAMENTO DETECTADO: ${symbol}*\n\n"
+                    f"📄 *CONTRATO:* \n`{addr}`\n\n"
+                    f"💰 Preço: `${price:.10f}`\n"
+                    f"💧 Liquidez: `${liq:,.0f}`\n"
+                    f"📊 Compras 5m: `{buys5m}`\n\n"
+                    f"🔗 [ABRIR NO GMGN]({gmgn_fix})"
+                )
+                send(msg)
+
+        except Exception as e:
+            print(f"Erro Scan: {e}")
+        time.sleep(DEX_INTERVAL)
+
+@app.route("/")
+def health(): return "BOT ONLINE"
+
+if __name__ == "__main__":
+    threading.Thread(target=scan, daemon=True).start()
+    threading.Thread(target=performance_report, daemon=True).start()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)

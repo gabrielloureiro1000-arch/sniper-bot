@@ -8,83 +8,64 @@ from flask import Flask
 # --- CONFIGURAÇÃO ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-DEX_INTERVAL = 2  # Scan ultra rápido (2 segundos)
+DEX_INTERVAL = 2 
 
-# FILTROS REDUZIDOS PARA MAIOR FREQUÊNCIA DE SINAIS
-MIN_LIQUIDITY = 500       # Aceita pools pequenas (lançamentos)
-MIN_VOLUME_M5 = 500       # Qualquer volume inicial já dispara
-MIN_BUYS_M5 = 3           # Apenas 3 compras em 5min já alertam
+# FILTROS PARA TOKENS PROMISSORES COM BALEIAS
+MIN_LIQUIDITY = 2000       # Liquidez mínima para não ser golpe imediato
+MIN_WHALE_BUYS = 8         # Pelo menos 8 compras significativas em 5min
+MIN_VOLUME_M5 = 3000       # Volume mínimo de $3k nos últimos 5min para indicar hype
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
 
 seen_tokens = set()
 monitored_prices = {} 
-alerts_count = 0
 
 def send(msg):
-    global alerts_count
     try:
         bot.send_message(CHAT_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
-        alerts_count += 1
     except Exception as e:
         print(f"Erro Telegram: {e}")
 
-# --- RELATÓRIO DE PERFORMANCE ---
+# --- RELATÓRIO DE PERFORMANCE (2H) ---
 def performance_report():
     while True:
-        time.sleep(7200) # 2 Horas
-        if not monitored_prices:
-            continue
-        report = "📊 *RELATÓRIO DE PERFORMANCE (2H)*\n\n"
+        time.sleep(7200)
+        if not monitored_prices: continue
+        report = "📊 *RELATÓRIO DE BALEIAS (2H)*\n\n"
         try:
-            # Pega todos os endereços monitorados
             addrs = list(monitored_prices.keys())
-            # Consulta em lotes de 30 para não travar a API
             for i in range(0, len(addrs), 30):
                 batch = ",".join(addrs[i:i+30])
                 url = f"https://api.dexscreener.com/latest/dex/tokens/{batch}"
                 r = requests.get(url, timeout=10)
                 pairs = r.json().get("pairs", [])
-                
-                # Preços atuais
-                current_prices = {p.get("baseToken", {}).get("address"): float(p.get("priceUsd", 0)) for p in pairs}
-
+                prices = {p.get("baseToken", {}).get("address"): float(p.get("priceUsd", 0)) for p in pairs}
                 for addr in addrs[i:i+30]:
                     data = monitored_prices[addr]
-                    initial_p = data["price"]
-                    current_p = current_prices.get(addr, 0)
-
-                    if current_p > 0:
-                        change = ((current_p - initial_p) / initial_p) * 100
-                        emoji = "🚀" if change >= 0 else "🔻"
-                        report += f"{emoji} *{data['symbol']}*: `{change:+.2f}%` desde o alerta\n"
-            
-            send(report if len(report) > 40 else "📊 *Relatório:* Nenhum token com dados ativos no momento.")
+                    initial = data["price"]
+                    current = prices.get(addr, 0)
+                    if current > 0:
+                        change = ((current - initial) / initial) * 100
+                        report += f"{'🚀' if change >= 0 else '🔻'} *{data['symbol']}*: `{change:+.2f}%` desde o sinal\n"
+            send(report)
         except Exception as e:
             print(f"Erro Relatório: {e}")
 
-# --- SCANNER DE TOKENS RECENTES (MAIS SINAIS) ---
+# --- SCANNER WHALE TRACKER ---
 def scan():
-    print("🔥 SCANNER DE LANÇAMENTOS INICIADO")
+    print("🐋 BUSCANDO RASTRO DAS BALEIAS NA SOLANA...")
+    send("🐋 *Whale Hunter Ativo:* Monitorando acúmulo de baleias...")
+    
     while True:
         try:
-            # MUDANÇA CRÍTICA: Usando o endpoint de tokens recentes em vez de busca
-            # Isso garante que tokens novos apareçam no radar
-            url = "https://api.dexscreener.com/token-profiles/latest/v1" 
-            # Como a API acima é limitada, alternamos com a busca global de SOL filtrada por data
+            # Busca tokens com volume e atividade na Solana
             r = requests.get("https://api.dexscreener.com/latest/dex/search?q=solana", timeout=10)
-            
-            if r.status_code != 200: 
-                time.sleep(5)
-                continue
+            if r.status_code != 200: continue
             
             pairs = r.json().get("pairs", [])
-            # Ordenar por criação (os mais novos primeiro)
-            pairs = sorted(pairs, key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
 
             for pair in pairs:
-                # Filtrar apenas rede Solana
                 if pair.get("chainId") != "solana": continue
                 
                 addr = pair.get("baseToken", {}).get("address")
@@ -97,23 +78,26 @@ def scan():
                 buys5m = pair.get("txns", {}).get("m5", {}).get("buys", 0)
                 price = float(pair.get("priceUsd", 0))
 
-                # Filtros para não pegar lixo, mas ser agressivo
+                # FILTRO DE BALEIAS: Alta liquidez + Volume alto + Muitas compras
                 if liq < MIN_LIQUIDITY: continue
-                if buys5m < MIN_BUYS_M5: continue
+                if buys5m < MIN_WHALE_BUYS: continue
+                if vol5m < MIN_VOLUME_M5: continue
 
                 seen_tokens.add(addr)
                 monitored_prices[addr] = {"symbol": symbol, "price": price}
 
-                # Link de busca direta para evitar erro de rede
-                gmgn_fix = f"https://gmgn.ai/sol/token/{addr}"
+                # LINK GMGN OTIMIZADO (Foca na atividade para você ver as baleias)
+                gmgn_url = f"https://gmgn.ai/sol/token/{addr}"
 
                 msg = (
-                    f"✨ *LANÇAMENTO DETECTADO: ${symbol}*\n\n"
-                    f"📄 *CONTRATO:* \n`{addr}`\n\n"
+                    f"🐋 *BALEIAS DETECTADAS EM: ${symbol}*\n"
+                    f"🔥 *Sinal Promissor - Alta Atividade*\n\n"
+                    f"📄 ` {addr} `\n\n"
                     f"💰 Preço: `${price:.10f}`\n"
                     f"💧 Liquidez: `${liq:,.0f}`\n"
-                    f"📊 Compras 5m: `{buys5m}`\n\n"
-                    f"🔗 [ABRIR NO GMGN]({gmgn_fix})"
+                    f"📊 Volume 5m: `${vol5m:,.0f}`\n"
+                    f"📈 Compras Recentes: `{buys5m}` baleias/grandes trades\n\n"
+                    f"🔗 [ABRIR NO GMGN (VER ATIVIDADE)]({gmgn_url})"
                 )
                 send(msg)
 
@@ -122,7 +106,7 @@ def scan():
         time.sleep(DEX_INTERVAL)
 
 @app.route("/")
-def health(): return "BOT ONLINE"
+def health(): return "WHALE SNIPER ONLINE"
 
 if __name__ == "__main__":
     threading.Thread(target=scan, daemon=True).start()

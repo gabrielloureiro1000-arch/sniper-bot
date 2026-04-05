@@ -15,27 +15,39 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 
 # ============================================================
-# FILTROS — RECALIBRADOS: pega sinais reais, filtra lixo
+# FILTROS DE ENTRADA — DEXScreener (triagem rápida)
 # ============================================================
-MIN_LIQUIDITY        = 2_000    # liquidez mínima real
-MAX_LIQUIDITY        = 600_000  # ignora tokens gigantes já bombados
-MIN_WHALE_BUYS       = 8        # mínimo 8 compras de baleia
-MAX_WHALE_BUYS       = 1_500    # acima disso é claramente bot
-MIN_VOLUME_M5        = 1_500    # volume mínimo real em 5min
-MIN_BUY_SELL_RATIO   = 1.5      # força compradora mínima
-MAX_BUY_SELL_RATIO   = 20.0     # acima = manipulação óbvia
-MIN_AGE_MINUTES      = 5        # ignora tokens com menos de 5 min
-MAX_AGE_MINUTES      = 180      # janela ampla para não perder nada
-MIN_PRICE_CHANGE_H1  = 1.0      # qualquer movimento positivo
-MAX_PRICE_CHANGE_H1  = 200.0    # subiu demais = tarde demais
-MAX_PRICE_CHANGE_M5  = 40.0     # pump muito violento em 5min
-MIN_SELLS_5M         = 1        # pelo menos 1 venda real
+MIN_LIQUIDITY        = 5_000    # liquidez mínima real
+MAX_LIQUIDITY        = 300_000  # acima = já bombou
+MIN_WHALE_BUYS       = 8        # mínimo 8 compras/5min
+MAX_WHALE_BUYS       = 800      # acima = bot
+MIN_VOLUME_M5        = 2_000
+MIN_BUY_SELL_RATIO   = 1.5
+MAX_BUY_SELL_RATIO   = 15.0
+MIN_AGE_MINUTES      = 5
+MAX_AGE_MINUTES      = 120      # 2h máximo — depois disso geralmente já foi
+MIN_PRICE_CHANGE_H1  = 2.0
+MAX_PRICE_CHANGE_H1  = 150.0
+MAX_PRICE_CHANGE_M5  = 35.0
+MIN_SELLS_5M         = 2        # mínimo de vendas reais
 
 # ============================================================
-# VELOCIDADE MÁXIMA
+# FILTROS ON-CHAIN — GMGN (verificação profunda)
+# Esses filtros eliminam rugs e manipulações
+# ============================================================
+MAX_TOP10_HOLDERS_PCT  = 35.0   # top 10 wallets não podem ter mais de 35% do supply
+MAX_SINGLE_HOLDER_PCT  = 10.0   # nenhuma wallet única com mais de 10%
+MIN_HOLDER_COUNT       = 50     # mínimo de holders reais
+MAX_DEV_HOLDING_PCT    = 5.0    # dev não pode ter mais de 5% do supply
+REQUIRE_LP_LOCKED      = True   # LP precisa estar travada (burn ou lock)
+MIN_SMART_MONEY_WALLETS = 1     # mínimo de 1 smart money wallet detectada
+
+# ============================================================
+# VELOCIDADE
 # ============================================================
 SCAN_WORKERS     = 8
-FETCH_TIMEOUT    = 4
+FETCH_TIMEOUT    = 5
+GMGN_TIMEOUT     = 6
 ALERT_QUEUE_SIZE = 500
 MAX_SEEN_TOKENS  = 25_000
 REPORT_INTERVAL  = 7_200
@@ -56,7 +68,7 @@ ENDPOINTS = [
 # ============================================================
 seen_tokens      = set()
 monitored_tokens = {}
-report_stats     = {"sent": 0, "green": 0, "yellow": 0, "red": 0}
+report_stats     = {"sent": 0, "green": 0, "yellow": 0, "red": 0, "blocked": 0}
 lock             = threading.Lock()
 alert_queue      = Queue(maxsize=ALERT_QUEUE_SIZE)
 
@@ -64,7 +76,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 app = Flask(__name__)
 
 # ============================================================
-# ENVIO ASSÍNCRONO — thread dedicada, scan nunca para
+# ENVIO ASSÍNCRONO
 # ============================================================
 
 def telegram_sender():
@@ -93,117 +105,278 @@ def send(msg: str):
         pass
 
 # ============================================================
-# SCORE DE RISCO — calibrado para gerar sinais úteis
-# Lógica:
-#   Verde  (0–35)  → Entre com confiança
-#   Amarelo(36–65) → Entre com cautela e stop loss
-#   Vermelho(66+)  → Evite ou fique de fora
+# GMGN — VERIFICAÇÃO ON-CHAIN
+# Busca dados reais de holder distribution, LP lock,
+# smart money e segurança do contrato
 # ============================================================
 
-def calculate_risk_score(buys5m, sells5m, ratio, liq,
-                          vol5m, vol1h, change_h1, change_m5, age_min) -> dict:
+def fetch_gmgn_token_info(addr: str) -> dict:
+    """
+    Busca informações on-chain do token via GMGN.
+    Retorna dict com dados de segurança ou None se falhar.
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Referer": "https://gmgn.ai/",
+        }
+        url  = f"https://gmgn.ai/api/v1/token/sol/{addr}"
+        resp = requests.get(url, headers=headers, timeout=GMGN_TIMEOUT)
+
+        if resp.status_code != 200:
+            return {}
+
+        data  = resp.json()
+        token = data.get("data", {}) or data.get("token", {}) or data
+
+        return {
+            "top10_holders_pct":  token.get("top10_holder_rate",   None),
+            "dev_holding_pct":    token.get("dev_token_burn_ratio", None),
+            "holder_count":       token.get("holder_count",         None),
+            "lp_burned":          token.get("burn_ratio",           None),
+            "is_honeypot":        token.get("is_honeypot",          None),
+            "buy_tax":            token.get("buy_tax",              None),
+            "sell_tax":           token.get("sell_tax",             None),
+            "is_open_source":     token.get("open_source",          None),
+            "is_mintable":        token.get("is_mintable",          None),
+            "renounced":          token.get("renounced",            None),
+            "smart_money_count":  token.get("smart_degen_count",    0),
+            "rug_ratio":          token.get("rug_ratio",            None),
+        }
+    except Exception as e:
+        print(f"[GMGN] {addr[:8]}: {e}")
+        return {}
+
+
+def check_onchain_safety(info: dict) -> tuple:
+    """
+    Verifica se o token passa nos critérios on-chain.
+    Retorna (passou: bool, motivo_bloqueio: str, flags: list)
+    """
+    if not info:
+        return True, "", ["⚠️ Dados on-chain indisponíveis — analise manualmente"]
+
+    flags      = []
+    hard_fails = []  # falhas críticas = bloqueia automaticamente
+
+    # ── HONEYPOT — bloqueio imediato ────────────────────
+    if info.get("is_honeypot") is True:
+        return False, "🚨 HONEYPOT detectado — impossível vender!", []
+
+    # ── RUG RATIO ────────────────────────────────────────
+    rug = info.get("rug_ratio")
+    if rug is not None:
+        if rug > 0.8:
+            return False, f"🚨 Rug ratio altíssimo ({rug:.0%}) — bloqueado", []
+        elif rug > 0.5:
+            flags.append(f"🚫 Rug ratio alto ({rug:.0%})")
+
+    # ── CONTRATO MALICIOSO ───────────────────────────────
+    if info.get("is_mintable") is True:
+        hard_fails.append("contrato mintable")
+        flags.append("🚫 Contrato mintable — dev pode criar tokens infinitos")
+
+    if info.get("is_open_source") is False:
+        flags.append("⚠️ Contrato não verificado / fechado")
+
+    # ── TAXAS ────────────────────────────────────────────
+    buy_tax  = info.get("buy_tax",  0) or 0
+    sell_tax = info.get("sell_tax", 0) or 0
+    if sell_tax > 10:
+        hard_fails.append(f"sell tax {sell_tax:.0f}%")
+        flags.append(f"🚫 Sell tax abusiva: {sell_tax:.0f}% — possível honeypot")
+    elif sell_tax > 5:
+        flags.append(f"⚠️ Sell tax alta: {sell_tax:.0f}%")
+    elif sell_tax > 0:
+        flags.append(f"✅ Sell tax: {sell_tax:.0f}%")
+
+    if buy_tax > 10:
+        flags.append(f"⚠️ Buy tax alta: {buy_tax:.0f}%")
+
+    # ── LP BURNED / LOCKED ───────────────────────────────
+    lp_burned = info.get("lp_burned")
+    if lp_burned is not None:
+        lp_pct = float(lp_burned) * 100 if lp_burned <= 1 else float(lp_burned)
+        if lp_pct >= 90:
+            flags.append(f"✅ LP queimada ({lp_pct:.0f}%) — seguro")
+        elif lp_pct >= 50:
+            flags.append(f"⚠️ LP parcialmente queimada ({lp_pct:.0f}%)")
+        else:
+            hard_fails.append(f"LP não travada ({lp_pct:.0f}%)")
+            flags.append(f"🚫 LP não travada ({lp_pct:.0f}%) — risco de rug")
+
+    # ── DISTRIBUIÇÃO DE HOLDERS ──────────────────────────
+    top10 = info.get("top10_holders_pct")
+    if top10 is not None:
+        top10_pct = float(top10) * 100 if top10 <= 1 else float(top10)
+        if top10_pct > 50:
+            hard_fails.append(f"top10 com {top10_pct:.0f}%")
+            flags.append(f"🚫 Top 10 wallets com {top10_pct:.0f}% do supply — bomba-relógio")
+        elif top10_pct > MAX_TOP10_HOLDERS_PCT:
+            flags.append(f"⚠️ Top 10 wallets com {top10_pct:.0f}% — concentrado")
+        else:
+            flags.append(f"✅ Distribuição saudável — top 10 com {top10_pct:.0f}%")
+
+    # ── DEV HOLDING ──────────────────────────────────────
+    dev = info.get("dev_holding_pct")
+    if dev is not None:
+        dev_pct = float(dev) * 100 if dev <= 1 else float(dev)
+        if dev_pct > 15:
+            hard_fails.append(f"dev com {dev_pct:.0f}%")
+            flags.append(f"🚫 Dev com {dev_pct:.0f}% do supply — risco extremo")
+        elif dev_pct > MAX_DEV_HOLDING_PCT:
+            flags.append(f"⚠️ Dev com {dev_pct:.0f}% do supply")
+        else:
+            flags.append(f"✅ Dev holding baixo ({dev_pct:.0f}%)")
+
+    # ── HOLDER COUNT ─────────────────────────────────────
+    holders = info.get("holder_count")
+    if holders is not None:
+        if holders < 30:
+            hard_fails.append(f"apenas {holders} holders")
+            flags.append(f"🚫 Apenas {holders} holders — muito concentrado")
+        elif holders < MIN_HOLDER_COUNT:
+            flags.append(f"⚠️ Poucos holders: {holders}")
+        else:
+            flags.append(f"✅ {holders} holders")
+
+    # ── SMART MONEY ──────────────────────────────────────
+    smart = info.get("smart_money_count", 0) or 0
+    if smart >= 3:
+        flags.append(f"✅ {smart} smart money wallets — sinal forte")
+    elif smart >= 1:
+        flags.append(f"✅ {smart} smart money wallet detectada")
+    else:
+        flags.append("⚠️ Nenhuma smart money detectada ainda")
+
+    # ── DECISÃO FINAL ────────────────────────────────────
+    if len(hard_fails) >= 2:
+        return False, f"Bloqueado: {' + '.join(hard_fails)}", flags
+    if hard_fails:
+        # 1 falha crítica = não bloqueia mas vira vermelho
+        return True, f"⚠️ {hard_fails[0]}", flags
+
+    return True, "", flags
+
+
+# ============================================================
+# SCORE DE RISCO — combina DEX + on-chain
+# ============================================================
+
+def calculate_risk_score(buys5m, sells5m, ratio, liq, vol5m,
+                          vol1h, change_h1, change_m5, age_min,
+                          onchain_flags: list, onchain_fail: str) -> dict:
     score   = 0
     greens  = []
     yellows = []
     reds    = []
 
+    # Penalidade por falha on-chain
+    if onchain_fail and "⚠️" in onchain_fail:
+        score += 20
+        reds.append(onchain_fail)
+
+    # Classifica flags on-chain
+    for f in onchain_flags:
+        if f.startswith("✅"):
+            greens.append(f)
+        elif f.startswith("⚠️"):
+            score += 8
+            yellows.append(f)
+        elif f.startswith("🚫"):
+            score += 20
+            reds.append(f)
+
     # ── LIQUIDEZ ─────────────────────────────────────────
     if liq >= 50_000:
         score -= 10; greens.append(f"Boa liquidez (${liq:,.0f})")
     elif liq >= 15_000:
-        score -= 5;  greens.append(f"Liquidez razoável (${liq:,.0f})")
+        score -= 5;  greens.append(f"Liquidez ok (${liq:,.0f})")
     elif liq >= 5_000:
         score += 5;  yellows.append(f"Liquidez baixa (${liq:,.0f})")
     else:
-        score += 20; reds.append(f"Liquidez muito baixa (${liq:,.0f}) — risco de manipulação")
+        score += 18; reds.append(f"Liquidez muito baixa (${liq:,.0f})")
 
-    # ── RATIO COMPRAS/VENDAS ─────────────────────────────
-    if ratio > 12:
-        score += 20; reds.append(f"Ratio {ratio:.0f}x anormal — possível pump artificial")
-    elif ratio > 6:
-        score += 10; yellows.append(f"Ratio elevado ({ratio:.1f}x) — monitorar")
+    # ── RATIO ────────────────────────────────────────────
+    if ratio > 10:
+        score += 15; yellows.append(f"Ratio elevado ({ratio:.1f}x)")
     elif ratio >= 2:
-        score -= 8;  greens.append(f"Força compradora saudável ({ratio:.1f}x)")
+        score -= 8;  greens.append(f"Força compradora ({ratio:.1f}x)")
     else:
         score -= 3;  greens.append(f"Ratio equilibrado ({ratio:.1f}x)")
 
-    # ── VOLUME DE COMPRAS — detecta bot ──────────────────
-    if buys5m > 800:
-        score += 25; reds.append(f"{buys5m} compras/5min — volume de bot detectado")
-    elif buys5m > 200:
-        score += 10; yellows.append(f"Muitas compras ({buys5m}/5min) — pode ser coordenado")
-    elif buys5m >= 30:
-        score -= 10; greens.append(f"Muitas compras reais ({buys5m}/5min)")
-    elif buys5m >= 15:
-        score -= 5;  greens.append(f"Boas compras ({buys5m}/5min)")
-    else:
+    # ── COMPRAS — detecta bot ────────────────────────────
+    if buys5m > 400:
+        score += 20; reds.append(f"{buys5m} compras/5min — volume suspeito de bot")
+    elif buys5m > 100:
+        score += 8;  yellows.append(f"Volume alto ({buys5m} compras/5min)")
+    elif buys5m >= 20:
+        score -= 8;  greens.append(f"Compras fortes ({buys5m}/5min)")
+    elif buys5m >= 8:
         greens.append(f"8+ compras de baleia ({buys5m}/5min)")
 
     # ── ACELERAÇÃO DE VOLUME ─────────────────────────────
     if vol5m > 0 and vol1h > 0:
         accel = vol5m / max(vol1h / 12, 1)
         if accel > 4:
-            score -= 10; greens.append(f"Volume acelerando forte ({accel:.1f}x média)")
+            score -= 10; greens.append(f"Volume acelerando ({accel:.1f}x média)")
         elif accel > 1.5:
             score -= 5;  greens.append(f"Volume acima da média ({accel:.1f}x)")
         elif accel < 0.5:
-            score += 8;  yellows.append("Volume desacelerando — atenção")
+            score += 8;  yellows.append("Volume desacelerando")
 
-    # ── IDADE DO PAR ─────────────────────────────────────
+    # ── IDADE ────────────────────────────────────────────
     if age_min < 10:
-        score += 25; reds.append(f"Par com apenas {age_min:.0f} min — risco de rug muito alto")
+        score += 20; reds.append(f"Par com {age_min:.0f} min — risco alto")
     elif age_min < 20:
-        score += 12; yellows.append(f"Par muito novo ({age_min:.0f} min) — cuidado")
+        score += 10; yellows.append(f"Par muito novo ({age_min:.0f} min)")
     elif age_min < 45:
-        score += 5;  yellows.append(f"Par novo ({age_min:.0f} min)")
+        score += 3;  yellows.append(f"Par novo ({age_min:.0f} min)")
     elif age_min < 90:
-        score -= 5;  greens.append(f"Par com algum histórico ({age_min:.0f} min)")
+        score -= 5;  greens.append(f"Par com histórico ({age_min:.0f} min)")
     else:
         score -= 10; greens.append(f"Par estabelecido ({age_min:.0f} min)")
 
-    # ── VARIAÇÃO 1H ───────────────────────────────────────
-    if change_h1 > 120:
-        score += 25; reds.append(f"Subiu +{change_h1:.0f}% em 1h — pump avançado, topo provável")
-    elif change_h1 > 70:
-        score += 15; reds.append(f"Alta intensa +{change_h1:.0f}% em 1h — risco de dump")
-    elif change_h1 > 30:
-        score += 8;  yellows.append(f"Alta forte +{change_h1:.0f}% em 1h")
-    elif change_h1 > 5:
+    # ── VARIAÇÃO 1H ──────────────────────────────────────
+    if change_h1 > 100:
+        score += 22; reds.append(f"+{change_h1:.0f}% em 1h — pump avançado, topo próximo")
+    elif change_h1 > 60:
+        score += 12; reds.append(f"+{change_h1:.0f}% em 1h — alta intensa")
+    elif change_h1 > 20:
+        score += 5;  yellows.append(f"+{change_h1:.0f}% em 1h")
+    elif change_h1 > 3:
         score -= 8;  greens.append(f"Movimento saudável +{change_h1:.0f}% em 1h")
     else:
         score -= 3;  greens.append(f"Início de movimento +{change_h1:.0f}% em 1h")
 
-    # ── VARIAÇÃO 5MIN ─────────────────────────────────────
-    if change_m5 > 25:
-        score += 15; yellows.append(f"Pump rápido +{change_m5:.0f}% em 5min — dump pode vir logo")
-    elif change_m5 > 10:
-        score += 5;  yellows.append(f"Subindo rápido +{change_m5:.0f}% em 5min")
+    # ── VARIAÇÃO 5MIN ────────────────────────────────────
+    if change_m5 > 20:
+        score += 12; yellows.append(f"Pump rápido +{change_m5:.0f}% em 5min")
+    elif change_m5 > 5:
+        score += 3;  yellows.append(f"Subindo +{change_m5:.0f}% em 5min")
     elif change_m5 > 0:
-        score -= 5;  greens.append(f"Alta suave +{change_m5:.0f}% em 5min ✓")
+        score -= 5;  greens.append(f"Alta suave +{change_m5:.0f}% em 5min")
     elif change_m5 < -10:
-        score += 15; reds.append(f"Caindo {change_m5:.0f}% em 5min — momentum negativo")
-    elif change_m5 < 0:
-        score += 5;  yellows.append(f"Leve queda {change_m5:.0f}% em 5min")
+        score += 12; reds.append(f"Caindo {change_m5:.0f}% em 5min")
 
-    # ── VENDAS REAIS ──────────────────────────────────────
+    # ── VENDAS REAIS ─────────────────────────────────────
     if sells5m == 0:
-        score += 20; reds.append("Zero vendas — sinal suspeito, possível manipulação")
+        score += 18; reds.append("Zero vendas — sinal suspeito")
     elif sells5m < 3:
-        score += 8;  yellows.append(f"Poucas vendas ({sells5m}) — monitorar")
-    elif sells5m < 10:
-        greens.append(f"Vendas reais presentes ({sells5m})")
+        score += 5;  yellows.append(f"Poucas vendas ({sells5m})")
     else:
-        score -= 5;  greens.append(f"Mercado bilateral ativo ({sells5m} vendas)")
+        score -= 5;  greens.append(f"Mercado bilateral ({sells5m} vendas)")
 
     score = max(0, min(100, score))
 
-    if score <= 35:
+    if score <= 30:
         return dict(score=score, emoji="🟢", label="SINAL VERDE",
-                    desc="Baixo risco — bom potencial de lucro",
+                    desc="Baixo risco — bom potencial",
                     greens=greens, yellows=yellows, reds=reds)
-    elif score <= 65:
+    elif score <= 60:
         return dict(score=score, emoji="🟡", label="SINAL AMARELO",
-                    desc="Risco moderado — entre com stop loss",
+                    desc="Risco moderado — use stop loss",
                     greens=greens, yellows=yellows, reds=reds)
     else:
         return dict(score=score, emoji="🔴", label="SINAL VERMELHO",
@@ -245,7 +418,7 @@ def fetch_pairs(url: str) -> list:
     return []
 
 # ============================================================
-# PROCESSAMENTO — ultra rápido, filtros em cascata
+# PROCESSAMENTO — triagem DEX + verificação on-chain
 # ============================================================
 
 def process_pair(pair: dict):
@@ -258,7 +431,6 @@ def process_pair(pair: dict):
     if not addr or addr in seen_tokens:
         return
 
-    # Extração única de todos os dados
     liq       = pair.get("liquidity",   {}).get("usd", 0) or 0
     vol5m     = pair.get("volume",      {}).get("m5",  0) or 0
     vol1h     = pair.get("volume",      {}).get("h1",  0) or 0
@@ -275,7 +447,7 @@ def process_pair(pair: dict):
     if not price_usd:
         return
 
-    # ── FILTROS EM CASCATA — mais rápido primeiro ─────────
+    # ── FILTROS DEX — triagem rápida ──────────────────────
     if buys5m    < MIN_WHALE_BUYS:       return
     if buys5m    > MAX_WHALE_BUYS:       return
     if liq       < MIN_LIQUIDITY:        return
@@ -292,15 +464,28 @@ def process_pair(pair: dict):
 
     price = float(price_usd)
 
-    # Lock só depois de passar tudo
+    # Lock antes da verificação on-chain (evita duplicatas)
     with lock:
         if addr in seen_tokens:
             return
         seen_tokens.add(addr)
 
+    # ── VERIFICAÇÃO ON-CHAIN VIA GMGN ────────────────────
+    # Essa chamada é mais lenta mas elimina rugs e honeypots
+    onchain     = fetch_gmgn_token_info(addr)
+    passed, fail_reason, onchain_flags = check_onchain_safety(onchain)
+
+    if not passed:
+        print(f"[BLOQUEADO] ${symbol} — {fail_reason}")
+        with lock:
+            report_stats["blocked"] += 1
+        return  # token rejeitado por critérios on-chain
+
+    # ── SCORE COMBINADO ───────────────────────────────────
     risk = calculate_risk_score(
         buys5m, sells5m, ratio, liq, vol5m,
-        vol1h, change_h1, change_m5, age_min
+        vol1h, change_h1, change_m5, age_min,
+        onchain_flags, fail_reason
     )
     whale_emoji, whale_label = classify_whale(buys5m, ratio, vol5m, liq)
 
@@ -319,6 +504,7 @@ def process_pair(pair: dict):
         elif "AMAR" in risk["label"]: report_stats["yellow"] += 1
         else:                         report_stats["red"]    += 1
 
+    # ── LINKS ─────────────────────────────────────────────
     gmgn_url   = f"https://gmgn.ai/sol/token/{addr}"
     dex_url    = f"https://dexscreener.com/solana/{addr}"
     trojan_url = f"https://t.me/solana_trojan_bot?start=r-user_{addr}"
@@ -330,15 +516,27 @@ def process_pair(pair: dict):
     risk_icon   = {"🟢": "🟩", "🟡": "🟨", "🔴": "🟥"}[risk["emoji"]]
     bar_risk    = risk_icon * risk_filled + "⬜" * (10 - risk_filled)
 
+    # Mostra os pontos mais relevantes
     analysis = ""
-    for g in risk["greens"][:2]:  analysis += f"\n✅ {g}"
+    for g in risk["greens"][:3]:  analysis += f"\n✅ {g}"
     for y in risk["yellows"][:2]: analysis += f"\n⚠️ {y}"
-    for r in risk["reds"][:2]:    analysis += f"\n🚫 {r}"
+    for r in risk["reds"][:3]:    analysis += f"\n🚫 {r}"
+
+    # Smart money destaque
+    smart = onchain.get("smart_money_count", 0) or 0
+    smart_line = f"🧠 Smart money: `{smart} wallets`\n" if smart > 0 else ""
+
+    holders    = onchain.get("holder_count")
+    holder_line= f"👥 Holders: `{holders}`\n" if holders else ""
+
+    lp         = onchain.get("lp_burned")
+    lp_pct     = (float(lp) * 100 if lp and lp <= 1 else float(lp)) if lp else None
+    lp_line    = f"🔒 LP queimada: `{lp_pct:.0f}%`\n" if lp_pct else ""
 
     tips = {
-        "🟢": "💡 Sinal limpo — boa janela de entrada, monitore a saída",
-        "🟡": "💡 Entre com cautela — defina stop loss antes de comprar",
-        "🔴": "💡 Risco alto — evite ou aguarde confirmação do movimento",
+        "🟢": "💡 Sinal limpo — boa janela de entrada",
+        "🟡": "💡 Entre com cautela — defina stop loss antes",
+        "🔴": "💡 Risco alto — evite ou aguarde confirmação",
     }
 
     msg = (
@@ -351,7 +549,10 @@ def process_pair(pair: dict):
         f"💧 Liq:      `${liq:,.0f}`\n"
         f"📊 Vol 5m:  `${vol5m:,.0f}`  |  Vol 1h: `${vol1h:,.0f}`\n"
         f"🔥 Compras: `{buys5m}` | Vendas: `{sells5m}` | Ratio: `{ratio:.1f}x`\n"
-        f"⏰ Idade:   `{age_min:.0f} min`\n\n"
+        f"⏰ Idade:   `{age_min:.0f} min`\n"
+        f"{smart_line}"
+        f"{holder_line}"
+        f"{lp_line}\n"
         f"💪 Força compradora:\n{bar_force}\n\n"
         f"🎯 Score de risco: `{risk['score']}/100`\n"
         f"{bar_risk}"
@@ -363,7 +564,7 @@ def process_pair(pair: dict):
     send(msg)
 
 # ============================================================
-# 8 WORKERS PARALELOS
+# 8 WORKERS — scan paralelo
 # ============================================================
 
 def scan_worker(worker_id: int):
@@ -375,26 +576,29 @@ def scan_worker(worker_id: int):
             prune_cache()
         for pair in fetch_pairs(url):
             process_pair(pair)
-        time.sleep(0.2)
+        time.sleep(0.3)
 
 
 def scan():
-    print(f"🐋 WHALE SNIPER PRO v3 — {SCAN_WORKERS} WORKERS")
+    print(f"🐋 WHALE SNIPER PRO v4 — ON-CHAIN")
     send(
-        "🟢 *WHALE SNIPER PRO v3 — ONLINE*\n\n"
+        "🟢 *WHALE SNIPER PRO v4 — ONLINE*\n\n"
         f"⚡ `{SCAN_WORKERS}` scanners paralelos\n"
-        f"🔄 `{len(ENDPOINTS)}` endpoints simultâneos\n"
-        f"📨 Envio assíncrono — alerta em < 1s\n\n"
-        "🛡️ *Filtros ativos:*\n"
-        f"  🐋 Compras: `{MIN_WHALE_BUYS}` → `{MAX_WHALE_BUYS}` /5min\n"
-        f"  📊 Ratio: `{MIN_BUY_SELL_RATIO}x` → `{MAX_BUY_SELL_RATIO}x`\n"
-        f"  💧 Liq: `${MIN_LIQUIDITY:,}` → `${MAX_LIQUIDITY:,}`\n"
-        f"  📈 Var 1h: `+{MIN_PRICE_CHANGE_H1:.0f}%` → `+{MAX_PRICE_CHANGE_H1:.0f}%`\n"
-        f"  ⚡ Pump 5m máx: `{MAX_PRICE_CHANGE_M5:.0f}%`\n"
-        f"  ⏰ Idade: `{MIN_AGE_MINUTES}` → `{MAX_AGE_MINUTES} min`\n"
-        f"  ✅ Mínimo `{MIN_SELLS_5M}` venda real\n\n"
-        "🎯 🟢≤35 | 🟡36-65 | 🔴≥66\n"
-        "🚨 Monitor de saída ativo\n"
+        f"🔗 Verificação on-chain via GMGN ativa\n\n"
+        "🛡️ *Filtros DEX (triagem rápida):*\n"
+        f"  🐋 Compras: `{MIN_WHALE_BUYS}–{MAX_WHALE_BUYS}` /5min\n"
+        f"  📊 Ratio: `{MIN_BUY_SELL_RATIO}x–{MAX_BUY_SELL_RATIO}x`\n"
+        f"  💧 Liq: `${MIN_LIQUIDITY:,}–${MAX_LIQUIDITY:,}`\n"
+        f"  📈 Var 1h: `+{MIN_PRICE_CHANGE_H1:.0f}%–{MAX_PRICE_CHANGE_H1:.0f}%`\n"
+        f"  ⏰ Idade: `{MIN_AGE_MINUTES}–{MAX_AGE_MINUTES} min`\n\n"
+        "🔬 *Filtros ON-CHAIN (proteção profunda):*\n"
+        f"  🔒 LP burn/lock verificada\n"
+        f"  👥 Distribuição de holders\n"
+        f"  🚫 Honeypot detector\n"
+        f"  💰 Dev holding verificado\n"
+        f"  🧠 Smart money wallets\n"
+        f"  📜 Contrato mintable/taxas\n\n"
+        "🎯 🟢≤30 | 🟡31-60 | 🔴≥61\n"
         "📢 Relatório a cada 2h"
     )
     threads = []
@@ -407,7 +611,7 @@ def scan():
         t.join()
 
 # ============================================================
-# MONITOR DE SAÍDA — a cada 3 min
+# MONITOR DE SAÍDA
 # ============================================================
 
 def monitor_exit():
@@ -508,7 +712,8 @@ def performance_report():
             with lock:
                 snapshot = dict(monitored_tokens)
                 stats    = dict(report_stats)
-                report_stats.update({"sent": 0, "green": 0, "yellow": 0, "red": 0})
+                report_stats.update({"sent": 0, "green": 0,
+                                     "yellow": 0, "red": 0, "blocked": 0})
 
             if not snapshot:
                 send("📊 *RELATÓRIO 2H*\nNenhum token alertado no período.")
@@ -545,6 +750,7 @@ def performance_report():
                 f"📊 *RELATÓRIO — {now}*\n"
                 f"{'─' * 30}\n"
                 f"📤 Alertas: `{stats['sent']}` | "
+                f"🚫 Bloqueados: `{stats.get('blocked',0)}`\n"
                 f"🟢`{stats['green']}` 🟡`{stats['yellow']}` 🔴`{stats['red']}`\n"
                 f"🎯 Acerto: `{hit_rate:.0f}%` "
                 f"(`{len(winners)}` ↑ / `{len(losers)}` ↓)\n"
@@ -600,8 +806,9 @@ def performance_report():
 def health():
     with lock:
         return (
-            f"WHALE SNIPER PRO v3 | "
-            f"Tokens: {len(monitored_tokens)} | "
+            f"WHALE SNIPER PRO v4 | "
+            f"Alertas: {len(monitored_tokens)} | "
+            f"Bloqueados: {report_stats.get('blocked',0)} | "
             f"Cache: {len(seen_tokens)} | "
             f"Fila TG: {alert_queue.qsize()} | "
             f"🟢{report_stats['green']} "

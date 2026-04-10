@@ -185,6 +185,7 @@ def fetch_pairs(url: str) -> list:
 
 
 def scan_worker(worker_id: int):
+    global seen_tokens
     ep_index = worker_id
     while True:
         url = ENDPOINTS[ep_index % len(ENDPOINTS)]
@@ -192,9 +193,7 @@ def scan_worker(worker_id: int):
 
         # Limpa cache periodicamente
         if worker_id == 0 and len(seen_tokens) > MAX_SEEN_TOKENS:
-            global seen_tokens
             seen_tokens = set(list(seen_tokens)[-(MAX_SEEN_TOKENS // 2):])
-
         for pair in fetch_pairs(url):
             passed, data = passes_dex_filters(pair)
             if not passed:

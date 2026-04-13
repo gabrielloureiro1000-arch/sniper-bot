@@ -15,21 +15,42 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 
 # ============================================================
-# FILTROS
+# FILTROS — CAPTURA PRECOCE
+# Objetivo: pegar o token NO INÍCIO, antes do pump principal
 # ============================================================
-MIN_LIQUIDITY        = 5_000
-MAX_LIQUIDITY        = 300_000
-MIN_WHALE_BUYS       = 8
-MAX_WHALE_BUYS       = 800
-MIN_VOLUME_M5        = 2_000
-MIN_BUY_SELL_RATIO   = 1.5
-MAX_BUY_SELL_RATIO   = 15.0
-MIN_AGE_MINUTES      = 5
-MAX_AGE_MINUTES      = 120
-MIN_PRICE_CHANGE_H1  = 2.0
-MAX_PRICE_CHANGE_H1  = 150.0
-MAX_PRICE_CHANGE_M5  = 35.0
-MIN_SELLS_5M         = 2
+
+# ── LIQUIDEZ ─────────────────────────────────────────────
+MIN_LIQUIDITY        = 3_000    # ↓ aceita liquidez menor = token ainda jovem
+MAX_LIQUIDITY        = 200_000  # ↓ acima disso já está grande demais
+
+# ── FILTRO DE BALEIA ─────────────────────────────────────
+MIN_WHALE_BUYS       = 8        # mínimo 8 compras = baleias entrando
+MAX_WHALE_BUYS       = 600      # anti-bot
+
+# ── VOLUME ───────────────────────────────────────────────
+MIN_VOLUME_M5        = 800      # ↓ volume baixo = token ainda barato
+                                 # volume alto = já foi descoberto
+
+# ── FORÇA COMPRADORA ─────────────────────────────────────
+MIN_BUY_SELL_RATIO   = 1.5      # compras > vendas = acumulação
+MAX_BUY_SELL_RATIO   = 15.0     # anti-manipulação
+
+# ── IDADE DO PAR — CRÍTICO PARA ENTRADA PRECOCE ──────────
+MIN_AGE_MINUTES      = 3        # ↓ pega tokens com 3 min de vida
+MAX_AGE_MINUTES      = 45       # ↓↓ MÁXIMO 45 min — depois disso já foi
+                                 # tokens > 45 min geralmente já tiveram o pump
+
+# ── VARIAÇÃO DE PREÇO — PEGA ANTES DO PUMP ───────────────
+MIN_PRICE_CHANGE_H1  = 0.0      # ↓↓ aceita 0% — token pode ainda não ter subido
+MAX_PRICE_CHANGE_H1  = 60.0     # ↓↓ acima de 60% em 1h = pump já avançado
+                                 # era 150% — agora entramos muito antes
+
+# ── VARIAÇÃO 5MIN — DETECTA INÍCIO DO MOVIMENTO ──────────
+MIN_PRICE_CHANGE_M5  = 0.0      # token pode estar flat ainda
+MAX_PRICE_CHANGE_M5  = 20.0     # ↓ pump violento em 5min = chegamos tarde
+
+# ── VENDAS REAIS ─────────────────────────────────────────
+MIN_SELLS_5M         = 1        # ↓ token novo pode ter poucas vendas ainda
 
 # ============================================================
 # VELOCIDADE MÁXIMA
@@ -143,18 +164,19 @@ def passes_dex_filters(pair: dict) -> tuple:
     ratio = buys5m / max(sells5m, 1)
 
     if not price_usd:                        return False, {}
-    if buys5m    < MIN_WHALE_BUYS:           return False, {}  # filtro baleia
+    if buys5m    < MIN_WHALE_BUYS:           return False, {}  # filtro baleia: mín 8 compras
     if buys5m    > MAX_WHALE_BUYS:           return False, {}  # anti-bot
     if liq       < MIN_LIQUIDITY:            return False, {}
     if liq       > MAX_LIQUIDITY:            return False, {}
     if vol5m     < MIN_VOLUME_M5:            return False, {}
     if ratio     < MIN_BUY_SELL_RATIO:       return False, {}
     if ratio     > MAX_BUY_SELL_RATIO:       return False, {}
-    if change_h1 < MIN_PRICE_CHANGE_H1:      return False, {}
-    if change_h1 > MAX_PRICE_CHANGE_H1:      return False, {}
-    if change_m5 > MAX_PRICE_CHANGE_M5:      return False, {}
-    if age_min   < MIN_AGE_MINUTES:          return False, {}
-    if age_min   > MAX_AGE_MINUTES:          return False, {}
+    if change_h1 < MIN_PRICE_CHANGE_H1:      return False, {}  # aceita 0% = token ainda barato
+    if change_h1 > MAX_PRICE_CHANGE_H1:      return False, {}  # já bombou demais
+    if change_m5 < MIN_PRICE_CHANGE_M5:      return False, {}  # precisa ter movimento em 5min
+    if change_m5 > MAX_PRICE_CHANGE_M5:      return False, {}  # pump violento = chegamos tarde
+    if age_min   < MIN_AGE_MINUTES:          return False, {}  # muito novo = rug iminente
+    if age_min   > MAX_AGE_MINUTES:          return False, {}  # > 45min = geralmente já foi
     if sells5m   < MIN_SELLS_5M:             return False, {}
 
     return True, {
@@ -550,12 +572,14 @@ def scan():
         f"🔬 `{ONCHAIN_WORKERS}` verificações on-chain paralelas\n"
         f"📨 Pipeline assíncrono 3 estágios\n"
         f"🔄 `{len(ENDPOINTS)}` endpoints simultâneos\n\n"
+        "🎯 *Modo: CAPTURA PRECOCE — entra antes do pump*\n\n"
         "🛡️ *Filtros DEX:*\n"
         f"  🐋 Compras: `{MIN_WHALE_BUYS}–{MAX_WHALE_BUYS}` /5min\n"
         f"  📊 Ratio: `{MIN_BUY_SELL_RATIO}x–{MAX_BUY_SELL_RATIO}x`\n"
         f"  💧 Liq: `${MIN_LIQUIDITY:,}–${MAX_LIQUIDITY:,}`\n"
-        f"  📈 Var 1h: `{MIN_PRICE_CHANGE_H1:.0f}%–{MAX_PRICE_CHANGE_H1:.0f}%`\n"
-        f"  ⏰ Idade: `{MIN_AGE_MINUTES}–{MAX_AGE_MINUTES} min`\n\n"
+        f"  📈 Var 1h: `{MIN_PRICE_CHANGE_H1:.0f}%–{MAX_PRICE_CHANGE_H1:.0f}%` (aceita 0%)\n"
+        f"  ⚡ Var 5m: `{MIN_PRICE_CHANGE_M5:.0f}%–{MAX_PRICE_CHANGE_M5:.0f}%`\n"
+        f"  ⏰ Idade: `{MIN_AGE_MINUTES}–{MAX_AGE_MINUTES} min` (janela fechada)\n\n"
         "🔬 *Verificação on-chain GMGN:*\n"
         "  🍯 Honeypot | 🔒 LP lock | 👥 Holders\n"
         "  💸 Taxas | 👨‍💻 Dev holding | 🧠 Smart money\n\n"

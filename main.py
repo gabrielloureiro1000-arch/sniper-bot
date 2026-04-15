@@ -15,39 +15,43 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 
 # ============================================================
-# FILTROS — CAPTURA PRECOCE + EQUILIBRADO
-# Objetivo: pegar cedo SEM cortar todos os sinais
+# FILTROS — SMART MONEY / EARLY ENTRY
+# Estratégia: entrar nos primeiros minutos junto com baleias
+# quando o token ainda vale pouco — sair na valorização
 # ============================================================
 
-# ── LIQUIDEZ ─────────────────────────────────────────────
-MIN_LIQUIDITY        = 2_000    # baixo = token jovem e barato
-MAX_LIQUIDITY        = 300_000  # acima = já bombou
+# ── MARKET CAP INDIRETO (via liquidez) ───────────────────
+# MC baixo = token ainda barato = maior potencial de x
+# Liq $3k–$80k corresponde aproximadamente a MC $20k–$500k
+MIN_LIQUIDITY        = 3_000    # abaixo = muito scam / sem liquidez real
+MAX_LIQUIDITY        = 80_000   # acima = já foi descoberto, tarde demais
 
-# ── FILTRO DE BALEIA ─────────────────────────────────────
-MIN_WHALE_BUYS       = 8        # mínimo 8 compras = baleias entrando
-MAX_WHALE_BUYS       = 800      # anti-bot
+# ── FILTRO DE BALEIA — NÚCLEO DO BOT ─────────────────────
+MIN_WHALE_BUYS       = 8        # mínimo 8 compras = smart money entrando
+MAX_WHALE_BUYS       = 700      # acima = bot/wash trading
 
-# ── VOLUME ───────────────────────────────────────────────
-MIN_VOLUME_M5        = 500      # bem baixo = token ainda no início
+# ── VOLUME — DETECTA MOVIMENTO REAL ──────────────────────
+MIN_VOLUME_M5        = 500      # volume mínimo para confirmar interesse real
+# sem máximo de volume — quanto mais melhor
 
 # ── FORÇA COMPRADORA ─────────────────────────────────────
-MIN_BUY_SELL_RATIO   = 1.3      # levemente comprador já é sinal
-MAX_BUY_SELL_RATIO   = 15.0     # anti-manipulação
+MIN_BUY_SELL_RATIO   = 1.5      # compras > vendas = acumulação ativa
+MAX_BUY_SELL_RATIO   = 15.0     # acima = manipulação / pump artificial
 
-# ── IDADE DO PAR ─────────────────────────────────────────
-MIN_AGE_MINUTES      = 3        # pega tokens com 3 min de vida
-MAX_AGE_MINUTES      = 90       # janela generosa mas fecha antes de 2h
+# ── IDADE — JANELA DE OPORTUNIDADE ───────────────────────
+MIN_AGE_MINUTES      = 2        # pega token com 2 min — bem no início
+MAX_AGE_MINUTES      = 60       # fecha em 60 min — depois disso já teve o pump
 
-# ── VARIAÇÃO DE PREÇO ────────────────────────────────────
-MIN_PRICE_CHANGE_H1  = -5.0     # aceita até -5% (token flat ou acumulando)
-MAX_PRICE_CHANGE_H1  = 120.0    # até 120% — ainda pode ter espaço
+# ── VARIAÇÃO DE PREÇO — PEGA ANTES DO PUMP ───────────────
+MIN_PRICE_CHANGE_H1  = -10.0    # aceita acumulando / caindo levemente
+MAX_PRICE_CHANGE_H1  = 80.0     # acima = pump avançado, você já chegou tarde
 
-# ── VARIAÇÃO 5MIN ────────────────────────────────────────
-MIN_PRICE_CHANGE_M5  = -5.0     # aceita leve queda (acumulação)
-MAX_PRICE_CHANGE_M5  = 30.0     # pump violento = chegamos tarde
+# ── VARIAÇÃO 5MIN — INÍCIO DO MOVIMENTO ──────────────────
+MIN_PRICE_CHANGE_M5  = -3.0     # aceita flat ou leve queda = acumulação
+MAX_PRICE_CHANGE_M5  = 25.0     # pump violento em 5min = dump a caminho
 
-# ── VENDAS REAIS ─────────────────────────────────────────
-MIN_SELLS_5M         = 1        # pelo menos 1 venda real
+# ── VENDAS REAIS — ANTI-BOT ──────────────────────────────
+MIN_SELLS_5M         = 1        # pelo menos 1 venda real confirma mercado bilateral
 
 # ============================================================
 # VELOCIDADE MÁXIMA
@@ -384,10 +388,12 @@ def calculate_risk_score(data: dict, onchain_flags: list, onchain_fail: str) -> 
         elif f.startswith("🚫"): score += 20; reds.append(f)
 
     # Liquidez
-    if liq >= 50_000:  score -= 10; greens.append(f"Boa liquidez (${liq:,.0f})")
-    elif liq >= 15_000: score -= 5; greens.append(f"Liquidez ok (${liq:,.0f})")
-    elif liq >= 5_000:  score += 5; yellows.append(f"Liquidez baixa (${liq:,.0f})")
-    else:               score += 18; reds.append(f"Liquidez muito baixa (${liq:,.0f})")
+    # Liquidez — no early entry, $3k–$30k é a zona ideal (MC baixo = mais upside)
+    if liq >= 50_000:   score += 5;  yellows.append(f"Liquidez alta (${liq:,.0f}) — MC elevado, upside menor")
+    elif liq >= 20_000: score -= 5;  greens.append(f"Boa liquidez (${liq:,.0f})")
+    elif liq >= 8_000:  score -= 10; greens.append(f"✨ Zona ideal early entry (${liq:,.0f}) — MC baixo")
+    elif liq >= 3_000:  score -= 5;  greens.append(f"Liquidez baixa mas ok (${liq:,.0f})")
+    else:               score += 18; reds.append(f"Liquidez insuficiente (${liq:,.0f})")
 
     # Ratio
     if ratio > 10:    score += 15; yellows.append(f"Ratio elevado ({ratio:.1f}x)")
@@ -407,19 +413,19 @@ def calculate_risk_score(data: dict, onchain_flags: list, onchain_fail: str) -> 
         elif accel > 1.5: score -= 5; greens.append(f"Volume acima da média ({accel:.1f}x)")
         elif accel < 0.5: score += 8; yellows.append("Volume desacelerando")
 
-    # Idade
-    if age_min < 10:   score += 20; reds.append(f"Par com {age_min:.0f} min — risco alto")
-    elif age_min < 20: score += 10; yellows.append(f"Par muito novo ({age_min:.0f} min)")
-    elif age_min < 45: score += 3;  yellows.append(f"Par novo ({age_min:.0f} min)")
-    elif age_min < 90: score -= 5;  greens.append(f"Par com histórico ({age_min:.0f} min)")
-    else:              score -= 10; greens.append(f"Par estabelecido ({age_min:.0f} min)")
+    # Idade — na estratégia early entry, jovem é BOM não ruim
+    if age_min < 2:    score += 25; reds.append(f"Par com {age_min:.0f} min — muito cedo, aguardar")
+    elif age_min < 5:  score += 5;  yellows.append(f"Par fresquinho ({age_min:.0f} min) — risco/recompensa alto")
+    elif age_min <= 20: score -= 10; greens.append(f"✨ Janela ideal! Par com {age_min:.0f} min — early entry")
+    elif age_min <= 45: score -= 5;  greens.append(f"Par jovem ({age_min:.0f} min) — ainda no tempo")
+    else:               score += 8;  yellows.append(f"Par com {age_min:.0f} min — janela fechando")
 
-    # Variação 1h
-    if change_h1 > 100:  score += 22; reds.append(f"+{change_h1:.0f}% em 1h — pump avançado")
-    elif change_h1 > 60: score += 12; reds.append(f"+{change_h1:.0f}% em 1h — alta intensa")
-    elif change_h1 > 20: score += 5;  yellows.append(f"+{change_h1:.0f}% em 1h")
-    elif change_h1 > 3:  score -= 8;  greens.append(f"Movimento saudável +{change_h1:.0f}% em 1h")
-    else:                score -= 3;  greens.append(f"Início de movimento +{change_h1:.0f}% em 1h")
+    # Variação 1h — baixa variação = token ainda barato = ÓTIMO
+    if change_h1 > 80:   score += 22; reds.append(f"+{change_h1:.0f}% em 1h — pump avançado, topo próximo")
+    elif change_h1 > 50: score += 10; yellows.append(f"+{change_h1:.0f}% em 1h — movimento forte")
+    elif change_h1 > 15: score -= 5;  greens.append(f"Movimento saudável +{change_h1:.0f}% em 1h")
+    elif change_h1 >= 0: score -= 10; greens.append(f"✨ Token flat/início — máximo potencial +{change_h1:.0f}% em 1h")
+    else:                score -= 8;  greens.append(f"Acumulando — token caiu {change_h1:.0f}% (possível reversão)")
 
     # Variação 5min
     if change_m5 > 20:    score += 12; yellows.append(f"Pump +{change_m5:.0f}% em 5min")

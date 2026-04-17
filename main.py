@@ -15,43 +15,42 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 
 # ============================================================
-# FILTROS — SMART MONEY / EARLY ENTRY
-# Estratégia: entrar nos primeiros minutos junto com baleias
-# quando o token ainda vale pouco — sair na valorização
+# FILTROS — SMART MONEY EARLY ENTRY
+# Baseado nas melhores práticas: entrar cedo, sair com lucro
+# Calibrado para GERAR SINAIS sem perder qualidade
 # ============================================================
 
-# ── MARKET CAP INDIRETO (via liquidez) ───────────────────
-# MC baixo = token ainda barato = maior potencial de x
-# Liq $3k–$80k corresponde aproximadamente a MC $20k–$500k
-MIN_LIQUIDITY        = 3_000    # abaixo = muito scam / sem liquidez real
-MAX_LIQUIDITY        = 80_000   # acima = já foi descoberto, tarde demais
+# ── LIQUIDEZ — zona ideal de MC baixo ────────────────────
+# $5k–$200k liq = MC aproximado $30k–$1M = upside real
+MIN_LIQUIDITY        = 5_000    # mínimo para ser seguro
+MAX_LIQUIDITY        = 200_000  # acima = já descoberto / MC alto demais
 
-# ── FILTRO DE BALEIA — NÚCLEO DO BOT ─────────────────────
-MIN_WHALE_BUYS       = 8        # mínimo 8 compras = smart money entrando
-MAX_WHALE_BUYS       = 700      # acima = bot/wash trading
+# ── FILTRO DE BALEIA — CORAÇÃO DO BOT ────────────────────
+MIN_WHALE_BUYS       = 5        # ↓ 5 compras já indica smart money entrando
+MAX_WHALE_BUYS       = 900      # acima = bot / wash trading
 
-# ── VOLUME — DETECTA MOVIMENTO REAL ──────────────────────
-MIN_VOLUME_M5        = 500      # volume mínimo para confirmar interesse real
-# sem máximo de volume — quanto mais melhor
+# ── VOLUME — crescimento real ─────────────────────────────
+MIN_VOLUME_M5        = 300      # ↓ bem baixo — token jovem tem volume pequeno
+# sem teto — volume alto é sinal positivo
 
-# ── FORÇA COMPRADORA ─────────────────────────────────────
-MIN_BUY_SELL_RATIO   = 1.5      # compras > vendas = acumulação ativa
-MAX_BUY_SELL_RATIO   = 15.0     # acima = manipulação / pump artificial
+# ── FORÇA COMPRADORA ──────────────────────────────────────
+MIN_BUY_SELL_RATIO   = 1.2      # ↓ levemente comprador já é acumulação
+MAX_BUY_SELL_RATIO   = 18.0     # anti-manipulação
 
-# ── IDADE — JANELA DE OPORTUNIDADE ───────────────────────
-MIN_AGE_MINUTES      = 2        # pega token com 2 min — bem no início
-MAX_AGE_MINUTES      = 60       # fecha em 60 min — depois disso já teve o pump
+# ── IDADE — janela ampla para não perder nada ─────────────
+MIN_AGE_MINUTES      = 1        # pega token com 1 min de vida
+MAX_AGE_MINUTES      = 120      # até 2h — como recomendado
 
-# ── VARIAÇÃO DE PREÇO — PEGA ANTES DO PUMP ───────────────
-MIN_PRICE_CHANGE_H1  = -10.0    # aceita acumulando / caindo levemente
-MAX_PRICE_CHANGE_H1  = 80.0     # acima = pump avançado, você já chegou tarde
+# ── VARIAÇÃO 1H — aceita flat e início de movimento ───────
+MIN_PRICE_CHANGE_H1  = -20.0    # acumulação pode ter queda antes de subir
+MAX_PRICE_CHANGE_H1  = 150.0    # permite tokens ainda em movimento
 
-# ── VARIAÇÃO 5MIN — INÍCIO DO MOVIMENTO ──────────────────
-MIN_PRICE_CHANGE_M5  = -3.0     # aceita flat ou leve queda = acumulação
-MAX_PRICE_CHANGE_M5  = 25.0     # pump violento em 5min = dump a caminho
+# ── VARIAÇÃO 5MIN ─────────────────────────────────────────
+MIN_PRICE_CHANGE_M5  = -10.0    # flat/queda = acumulação = BOM
+MAX_PRICE_CHANGE_M5  = 40.0     # pump violento = chegamos tarde
 
-# ── VENDAS REAIS — ANTI-BOT ──────────────────────────────
-MIN_SELLS_5M         = 1        # pelo menos 1 venda real confirma mercado bilateral
+# ── VENDAS REAIS ──────────────────────────────────────────
+MIN_SELLS_5M         = 1        # pelo menos 1 venda = mercado real
 
 # ============================================================
 # VELOCIDADE MÁXIMA
@@ -576,14 +575,14 @@ def scan():
         f"📨 Pipeline assíncrono 3 estágios\n"
         f"🔄 `{len(ENDPOINTS)}` endpoints simultâneos\n\n"
         "🎯 *Modo: CAPTURA PRECOCE + EQUILIBRADO*\n\n"
-        "🛡️ *Filtros DEX:*\n"
+        "🎯 *Modo: SMART MONEY EARLY ENTRY*\n\n"
         f"  🐋 Compras: `{MIN_WHALE_BUYS}–{MAX_WHALE_BUYS}` /5min\n"
         f"  📊 Ratio: `{MIN_BUY_SELL_RATIO}x–{MAX_BUY_SELL_RATIO}x`\n"
         f"  💧 Liq: `${MIN_LIQUIDITY:,}–${MAX_LIQUIDITY:,}` | Vol5m mín `${MIN_VOLUME_M5:,}`\n"
-        f"  📈 Var 1h: `{MIN_PRICE_CHANGE_H1:.0f}%–{MAX_PRICE_CHANGE_H1:.0f}%` (aceita 0%)\n"
-        f"  ⚡ Var 5m: `{MIN_PRICE_CHANGE_M5:.0f}%–{MAX_PRICE_CHANGE_M5:.0f}%`\n"
-        f"  ⏰ Idade: `{MIN_AGE_MINUTES}–{MAX_AGE_MINUTES} min` (janela fechada)\n\n"
-        "🔬 *Verificação on-chain GMGN:*\n"
+        f"  💧 Liq: `${MIN_LIQUIDITY:,}–${MAX_LIQUIDITY:,}`\n"
+        f"  📈 Var 1h: `{MIN_PRICE_CHANGE_H1:.0f}%` a `+{MAX_PRICE_CHANGE_H1:.0f}%`\n"
+        f"  ⚡ Var 5m: `{MIN_PRICE_CHANGE_M5:.0f}%` a `+{MAX_PRICE_CHANGE_M5:.0f}%`\n"
+        f"  ⏰ Idade: `{MIN_AGE_MINUTES}–{MAX_AGE_MINUTES} min`\n\n"
         "  🍯 Honeypot | 🔒 LP lock | 👥 Holders\n"
         "  💸 Taxas | 👨‍💻 Dev holding | 🧠 Smart money\n\n"
         "📢 Relatório a cada 2h"

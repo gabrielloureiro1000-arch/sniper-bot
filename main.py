@@ -1,6 +1,3 @@
-bash
-
-cat > /mnt/user-data/outputs/whale_sniper_bot.py << 'PYEOF'
 import os
 import time
 import threading
@@ -752,5 +749,3 @@ if __name__ == "__main__":
         time.sleep(0.05)
 
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-PYEOF
-python3 -c "import ast; ast.parse(open('/mnt/user-data/outputs/whale_sniper_bot.py').read()); print('✅ Sintaxe OK')"

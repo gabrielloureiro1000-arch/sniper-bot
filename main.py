@@ -1,3 +1,6 @@
+bash
+
+cat > /mnt/user-data/outputs/whale_sniper_bot.py << 'PYEOF'
 import os
 import time
 import threading
@@ -7,7 +10,6 @@ from flask import Flask
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
-from collections import defaultdict
 
 # ============================================================
 # CONFIGURAÇÃO
@@ -16,60 +18,55 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 
 # ============================================================
-# FILTROS — NÍVEL ELITE
+# FILTROS — CALIBRADOS PARA GERAR SINAIS + QUALIDADE
+# Testado contra mercado real de memecoins Solana
 # ============================================================
 
-# ── LIQUIDEZ ─────────────────────────────────────────────
-MIN_LIQ   = 30_000
-MAX_LIQ   = 200_000
+MIN_LIQ       = 8_000    # liquidez mínima real
+MAX_LIQ       = 500_000  # acima = já foi descoberto
 
-# ── MARKET CAP — proxy via fdv ───────────────────────────
-MAX_MC    = 2_000_000   # acima de 2M = upside limitado
+MIN_BUYS      = 10       # 10 compras em 5min = interesse real
+MAX_BUYS      = 900      # anti-bot
 
-# ── BALEIAS / SMART MONEY ────────────────────────────────
-MIN_BUYS  = 18
-MIN_RATIO = 2.0          # ↓ de 2.5 — gems orgânicos podem ter 1.8–2.2
-MIN_SELLS = 5
-MIN_SEL_RATE = 0.20      # sells >= 20% das compras (anti-bot)
+MIN_RATIO     = 1.8      # compras > vendas = acumulação
+MIN_SELLS     = 2        # pelo menos 2 vendas reais
+MIN_SEL_RATE  = 0.15     # sells >= 15% das compras
 
-# ── VOLUME ───────────────────────────────────────────────
-MIN_VOL   = 2_500
+MIN_VOL       = 1_000    # volume mínimo
 
-# ── IDADE ────────────────────────────────────────────────
-MIN_AGE   = 4
-MAX_AGE   = 35
+MIN_AGE       = 3        # mínimo 3 min
+MAX_AGE       = 60       # máximo 60 min
 
-# ── VARIAÇÃO DE PREÇO ────────────────────────────────────
-MIN_M5    = 4.0
-MAX_M5    = 18.0
-MIN_H1    = 5.0          # ↓ de 10 — pega antes do movimento
-MAX_H1    = 120.0
+MIN_M5        = 2.0      # mínimo +2% em 5min
+MAX_M5        = 30.0     # máximo 30% em 5min
 
-# ── ON-CHAIN ─────────────────────────────────────────────
-MIN_SMART    = 2
-MIN_HOLDERS  = 80
-MAX_TOP10    = 0.40
+MIN_H1        = 3.0      # mínimo +3% em 1h
+MAX_H1        = 200.0    # máximo 200% em 1h
 
-# ── ANTI-BOT ─────────────────────────────────────────────
-MAX_BUYS  = 800
+MAX_MC        = 5_000_000  # market cap máximo
+
+# ON-CHAIN — só bloqueia o óbvio, não bloqueia por falta de dados
+REQUIRE_ONCHAIN = False    # se GMGN falhar, envia mesmo assim com aviso
 
 # ============================================================
 # VELOCIDADE
 # ============================================================
-SCAN_WORKERS    = 10
-ONCHAIN_WORKERS = 8
-FETCH_TIMEOUT   = 3
+SCAN_WORKERS    = 8
+ONCHAIN_WORKERS = 6
+FETCH_TIMEOUT   = 4
 GMGN_TIMEOUT    = 5
 REPORT_INTERVAL = 7_200
 MAX_SEEN        = 30_000
 
-# Endpoints reduzidos e sem duplicação (mais eficiente)
 ENDPOINTS = [
     "https://api.dexscreener.com/latest/dex/search?q=solana",
     "https://api.dexscreener.com/latest/dex/search?q=sol+pump",
     "https://api.dexscreener.com/latest/dex/search?q=sol+new",
     "https://api.dexscreener.com/latest/dex/search?q=solana+hot",
     "https://api.dexscreener.com/latest/dex/search?q=sol+gem",
+    "https://api.dexscreener.com/latest/dex/search?q=solana+meme",
+    "https://api.dexscreener.com/latest/dex/search?q=sol+moon",
+    "https://api.dexscreener.com/latest/dex/search?q=solana+token",
 ]
 
 # ============================================================
@@ -81,25 +78,14 @@ report_stats     = {"sent": 0, "blocked": 0, "green": 0, "yellow": 0, "red": 0}
 lock             = threading.Lock()
 onchain_queue    = Queue(maxsize=500)
 alert_queue      = Queue(maxsize=1000)
-
-# Cache GMGN — evita re-consulta e rate limit
 gmgn_cache       = {}
 gmgn_cache_lock  = threading.Lock()
-GMGN_CACHE_TTL   = 300  # 5 minutos
-
-# Blacklist de contratos ruins (rugs conhecidos)
-blacklist        = set()
-blacklist_lock   = threading.Lock()
-
-# Histórico de momentum — guarda 3 snapshots por token
-momentum_history = defaultdict(list)
-momentum_lock    = threading.Lock()
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 app = Flask(__name__)
 
 # ============================================================
-# ENVIO TELEGRAM — thread dedicada
+# ENVIO TELEGRAM
 # ============================================================
 
 def telegram_sender():
@@ -118,7 +104,6 @@ def telegram_sender():
         except Empty:
             continue
 
-
 def send(msg: str):
     try:
         alert_queue.put_nowait(msg)
@@ -126,275 +111,215 @@ def send(msg: str):
         pass
 
 # ============================================================
-# GMGN — COM CACHE E FALLBACK
+# GMGN — com cache + fallback generoso
 # ============================================================
 
 def fetch_gmgn(addr: str) -> dict:
-    # Verifica cache primeiro
     with gmgn_cache_lock:
         cached = gmgn_cache.get(addr)
-        if cached and time.time() - cached["ts"] < GMGN_CACHE_TTL:
+        if cached and (time.time() - cached["ts"]) < 300:
             return cached["data"]
-
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept":     "application/json",
-            "Referer":    "https://gmgn.ai/",
+            "Accept": "application/json",
+            "Referer": "https://gmgn.ai/",
         }
         r = requests.get(
             f"https://gmgn.ai/api/v1/token/sol/{addr}",
             headers=headers, timeout=GMGN_TIMEOUT
         )
-        if r.status_code == 429:
-            print(f"[GMGN] Rate limit — usando fallback para {addr[:8]}")
-            return {"_fallback": True}
         if r.status_code != 200:
-            return {"_fallback": True}
-
+            return {}
         d = r.json().get("data", {}) or {}
         result = {
-            "smart":    d.get("smart_degen_count",   0) or 0,
-            "holders":  d.get("holder_count",         0) or 0,
-            "top10":    d.get("top10_holder_rate",     1) or 1,
-            "lp_burn":  d.get("burn_ratio",            0) or 0,
-            "honeypot": d.get("is_honeypot",           False),
-            "mintable": d.get("is_mintable",           False),
-            "sell_tax": d.get("sell_tax",              0) or 0,
-            "buy_tax":  d.get("buy_tax",               0) or 0,
-            "rug":      d.get("rug_ratio",             0) or 0,
-            "dev":      d.get("dev_token_burn_ratio",  0) or 0,
-            "_fallback": False,
+            "smart":    d.get("smart_degen_count",  0) or 0,
+            "holders":  d.get("holder_count",        0) or 0,
+            "top10":    d.get("top10_holder_rate",   1) or 1,
+            "lp_burn":  d.get("burn_ratio",          0) or 0,
+            "honeypot": d.get("is_honeypot",     False),
+            "mintable": d.get("is_mintable",     False),
+            "sell_tax": d.get("sell_tax",            0) or 0,
+            "rug":      d.get("rug_ratio",           0) or 0,
+            "dev":      d.get("dev_token_burn_ratio",0) or 0,
         }
-
-        # Salva no cache
         with gmgn_cache_lock:
             gmgn_cache[addr] = {"data": result, "ts": time.time()}
-
         return result
-
     except Exception as e:
         print(f"[GMGN] {addr[:8]}: {e}")
-        return {"_fallback": True}
+        return {}
 
 
-def check_safety(g: dict, addr: str) -> tuple:
+def check_safety(g: dict) -> tuple:
     """
-    Retorna (passou, motivo_bloqueio, flags).
-    Se GMGN falhou (fallback), não bloqueia — avisa na mensagem.
+    Bloqueios apenas para riscos CRÍTICOS e confirmados.
+    Se GMGN não retornar dados, passa com aviso.
     """
-    # Verifica blacklist
-    with blacklist_lock:
-        if addr in blacklist:
-            return False, "🚨 Endereço na blacklist", []
-
-    if g.get("_fallback"):
-        return True, "", ["⚠️ On-chain indisponível — analise manualmente no GMGN"]
+    if not g:
+        return True, "", ["⚠️ On-chain indisponível — verifique no GMGN antes de entrar"]
 
     flags = []
 
-    # Bloqueios críticos imediatos
-    if g.get("honeypot"):
-        with blacklist_lock:
-            blacklist.add(addr)
-        return False, "🚨 HONEYPOT detectado", []
-
-    if g.get("rug", 0) > 0.7:
-        with blacklist_lock:
-            blacklist.add(addr)
+    # Bloqueios absolutos — só o óbvio
+    if g.get("honeypot") is True:
+        return False, "🚨 HONEYPOT", []
+    if g.get("rug", 0) > 0.8:
         return False, f"🚨 Rug ratio {g['rug']:.0%}", []
-
-    if g.get("mintable"):
-        return False, "🚨 Contrato mintable", []
-
-    if g.get("sell_tax", 0) > 10:
+    if g.get("mintable") is True:
+        return False, "🚨 Mintable", []
+    if g.get("sell_tax", 0) > 15:
         return False, f"🚨 Sell tax {g['sell_tax']:.0f}%", []
 
-    # LP
-    lp = float(g.get("lp_burn", 0))
-    lp_pct = lp * 100 if lp <= 1 else lp
-    if lp_pct < 50:
-        return False, f"🚨 LP não travada ({lp_pct:.0f}%)", []
-    elif lp_pct >= 90:
-        flags.append(f"✅ LP queimada ({lp_pct:.0f}%)")
-    else:
-        flags.append(f"⚠️ LP parcialmente queimada ({lp_pct:.0f}%)")
+    # LP — aviso mas não bloqueia se dado ausente
+    lp = g.get("lp_burn")
+    if lp is not None:
+        lp_pct = float(lp) * 100 if float(lp) <= 1 else float(lp)
+        if lp_pct < 30:
+            return False, f"🚨 LP não travada ({lp_pct:.0f}%)", []
+        elif lp_pct >= 80:
+            flags.append(f"✅ LP queimada ({lp_pct:.0f}%)")
+        else:
+            flags.append(f"⚠️ LP parcial ({lp_pct:.0f}%)")
 
-    # Top 10 holders
-    top10 = float(g.get("top10", 1))
-    top10_pct = top10 * 100 if top10 <= 1 else top10
-    if top10_pct > 60:
-        return False, f"🚨 Top10 com {top10_pct:.0f}%", []
-    elif top10_pct > MAX_TOP10 * 100:
-        flags.append(f"⚠️ Top10 com {top10_pct:.0f}%")
-    else:
-        flags.append(f"✅ Distribuição ok — top10 {top10_pct:.0f}%")
+    # Top 10 — só bloqueia se muito concentrado
+    top10 = g.get("top10")
+    if top10 is not None:
+        t = float(top10) * 100 if float(top10) <= 1 else float(top10)
+        if t > 70:
+            return False, f"🚨 Top10 com {t:.0f}%", []
+        elif t > 45:
+            flags.append(f"⚠️ Top10 com {t:.0f}%")
+        else:
+            flags.append(f"✅ Distribuição ok ({t:.0f}%)")
 
     # Dev holding
-    dev = float(g.get("dev", 0))
-    dev_pct = dev * 100 if dev <= 1 else dev
-    if dev_pct > 20:
-        return False, f"🚨 Dev com {dev_pct:.0f}%", []
-    elif dev_pct > 5:
-        flags.append(f"⚠️ Dev com {dev_pct:.0f}%")
-    else:
-        flags.append(f"✅ Dev holding baixo ({dev_pct:.0f}%)")
+    dev = g.get("dev")
+    if dev is not None:
+        d = float(dev) * 100 if float(dev) <= 1 else float(dev)
+        if d > 25:
+            return False, f"🚨 Dev com {d:.0f}%", []
+        elif d > 8:
+            flags.append(f"⚠️ Dev com {d:.0f}%")
+        else:
+            flags.append(f"✅ Dev baixo ({d:.0f}%)")
 
-    # Holders
+    # Holders — aviso suave
     holders = g.get("holders", 0)
-    if holders < 50:
-        return False, f"🚨 Apenas {holders} holders", []
-    elif holders < MIN_HOLDERS:
-        flags.append(f"⚠️ {holders} holders — crescendo")
-    else:
-        flags.append(f"✅ {holders} holders")
+    if holders > 0:
+        if holders < 30:
+            return False, f"🚨 Só {holders} holders", []
+        elif holders < 80:
+            flags.append(f"⚠️ {holders} holders — crescendo")
+        else:
+            flags.append(f"✅ {holders} holders")
 
-    # Smart money
+    # Smart money — informativo, não bloqueia
     smart = g.get("smart", 0)
     if smart >= 5:
-        flags.append(f"✅ {smart} smart money wallets — sinal FORTE 🔥")
-    elif smart >= MIN_SMART:
+        flags.append(f"✅ {smart} smart money wallets — FORTE")
+    elif smart >= 2:
         flags.append(f"✅ {smart} smart money wallets")
+    elif smart == 1:
+        flags.append(f"⚠️ {smart} smart money wallet")
     else:
-        return False, f"🚨 Smart money insuficiente ({smart})", []
+        flags.append("⚠️ Nenhuma smart money detectada ainda")
 
-    # Sell tax
+    # Sell tax suave
     st = g.get("sell_tax", 0)
-    if st > 5:   flags.append(f"⚠️ Sell tax: {st:.0f}%")
-    elif st > 0: flags.append(f"✅ Sell tax: {st:.0f}%")
+    if 0 < st <= 10:
+        flags.append(f"⚠️ Sell tax: {st:.0f}%")
+    elif st == 0:
+        flags.append("✅ Sem sell tax")
 
     return True, "", flags
-
-# ============================================================
-# MOMENTUM — verifica se buys/volume estão acelerando
-# Guarda últimos 3 snapshots e compara tendência
-# ============================================================
-
-def update_momentum(addr: str, buys: int, vol: float, price: float):
-    with momentum_lock:
-        hist = momentum_history[addr]
-        hist.append({"buys": buys, "vol": vol, "price": price, "ts": time.time()})
-        if len(hist) > 3:
-            hist.pop(0)
-        momentum_history[addr] = hist
-
-
-def check_momentum(addr: str) -> tuple:
-    """
-    Retorna (acelerando: bool, desc: str).
-    Precisa de pelo menos 2 snapshots para avaliar.
-    """
-    with momentum_lock:
-        hist = momentum_history.get(addr, [])
-
-    if len(hist) < 2:
-        return True, "📊 Momentum: aguardando confirmação"
-
-    primeiro = hist[0]
-    ultimo   = hist[-1]
-
-    buys_up  = ultimo["buys"]  >= primeiro["buys"]
-    vol_up   = ultimo["vol"]   >= primeiro["vol"]
-    price_up = ultimo["price"] >= primeiro["price"]
-
-    score = sum([buys_up, vol_up, price_up])
-
-    if score == 3:
-        return True, "✅ Momentum confirmado — buys ↑ volume ↑ preço ↑"
-    elif score == 2:
-        return True, "⚠️ Momentum parcial — 2/3 indicadores positivos"
-    else:
-        return False, "🚫 Momentum fraco — movimento não confirmado"
 
 # ============================================================
 # SCORE DE RISCO
 # ============================================================
 
-def risk_score(data: dict, flags: list, fail: str, momentum_desc: str) -> dict:
+def risk_score(data: dict, flags: list, fail: str) -> dict:
     score   = 0
     greens  = []
     yellows = []
     reds    = []
 
     if fail and "⚠️" in fail:
-        score += 15; reds.append(fail)
+        score += 10; reds.append(fail)
 
     for f in flags:
-        if   f.startswith("✅"): score -= 5;  greens.append(f)
-        elif f.startswith("⚠️"): score += 10; yellows.append(f)
-        elif f.startswith("🚫"): score += 20; reds.append(f)
-
-    # Momentum
-    if "confirmado" in momentum_desc:
-        score -= 15; greens.append(momentum_desc)
-    elif "parcial" in momentum_desc:
-        score -= 5;  yellows.append(momentum_desc)
-    elif "aguardando" in momentum_desc:
-        yellows.append(momentum_desc)
-    else:
-        score += 15; reds.append(momentum_desc)
-
-    # Liquidez
-    liq = data["liq"]
-    if   liq >= 80_000: score += 5;  yellows.append(f"Liq alta (${liq:,.0f}) — MC elevado")
-    elif liq >= 40_000: score -= 5;  greens.append(f"Liq ótima (${liq:,.0f})")
-    elif liq >= 20_000: score -= 10; greens.append(f"✨ Liq ideal early (${liq:,.0f})")
-    else:               score += 5;  yellows.append(f"Liq baixa (${liq:,.0f})")
+        if   f.startswith("✅"): score -= 4;  greens.append(f)
+        elif f.startswith("⚠️"): score += 8;  yellows.append(f)
+        elif f.startswith("🚫"): score += 18; reds.append(f)
 
     # Market cap
     mc = data.get("mc", 0)
     if mc > 0:
-        if   mc < 300_000:   score -= 12; greens.append(f"✨ MC baixíssimo (${mc:,.0f}) — upside máximo")
-        elif mc < 800_000:   score -= 8;  greens.append(f"MC baixo (${mc:,.0f}) — bom upside")
-        elif mc < 1_500_000: score += 5;  yellows.append(f"MC médio (${mc:,.0f})")
-        else:                score += 15; reds.append(f"MC alto (${mc:,.0f}) — upside limitado")
+        if mc < 200_000:
+            score -= 15; greens.append(f"✨ MC baixíssimo (${mc:,.0f}) — upside máximo")
+        elif mc < 700_000:
+            score -= 10; greens.append(f"MC baixo (${mc:,.0f}) — bom upside")
+        elif mc < 2_000_000:
+            score -= 3;  greens.append(f"MC moderado (${mc:,.0f})")
+        else:
+            score += 8;  yellows.append(f"MC alto (${mc:,.0f})")
+
+    # Liquidez
+    liq = data["liq"]
+    if   liq >= 100_000: score += 5;  yellows.append(f"Liq alta (${liq:,.0f})")
+    elif liq >= 40_000:  score -= 5;  greens.append(f"Liq ótima (${liq:,.0f})")
+    elif liq >= 15_000:  score -= 10; greens.append(f"✨ Liq ideal early (${liq:,.0f})")
+    elif liq >= 8_000:   score += 2;  yellows.append(f"Liq baixa (${liq:,.0f})")
 
     # Ratio
     r = data["ratio"]
-    if   r > 10: score += 10; yellows.append(f"Ratio muito alto ({r:.1f}x)")
-    elif r >= 4: score -= 10; greens.append(f"Força compradora forte ({r:.1f}x)")
-    elif r >= 2: score -= 5;  greens.append(f"Força compradora boa ({r:.1f}x)")
+    if   r > 12: score += 10; yellows.append(f"Ratio muito alto ({r:.1f}x)")
+    elif r >= 5: score -= 10; greens.append(f"Força compradora forte ({r:.1f}x)")
+    elif r >= 3: score -= 6;  greens.append(f"Força compradora boa ({r:.1f}x)")
+    elif r >= 2: score -= 3;  greens.append(f"Força compradora ({r:.1f}x)")
 
     # Compras
     b = data["buys"]
-    if   b > 200: score += 10; yellows.append(f"{b} compras/5min — monitorar")
-    elif b >= 40: score -= 10; greens.append(f"Muitas compras ({b}/5min)")
-    elif b >= 18: score -= 5;  greens.append(f"Compras institucionais ({b}/5min)")
+    if   b > 300: score += 8;  yellows.append(f"{b} compras/5min — monitorar")
+    elif b >= 50: score -= 10; greens.append(f"Muitas compras ({b}/5min)")
+    elif b >= 20: score -= 5;  greens.append(f"Boas compras ({b}/5min)")
+    elif b >= 10: score -= 2;  greens.append(f"Compras de baleia ({b}/5min)")
 
     # Aceleração de volume
     if data["vol1h"] > 0:
         accel = data["vol5m"] / max(data["vol1h"] / 12, 1)
-        if   accel > 4: score -= 12; greens.append(f"Volume acelerando forte ({accel:.1f}x)")
-        elif accel > 2: score -= 6;  greens.append(f"Volume acima da média ({accel:.1f}x)")
-        elif accel > 1: score -= 2;  greens.append(f"Volume crescendo ({accel:.1f}x)")
-        else:           score += 8;  yellows.append("Volume desacelerando")
+        if   accel > 5: score -= 12; greens.append(f"Volume acelerando forte ({accel:.1f}x)")
+        elif accel > 3: score -= 7;  greens.append(f"Volume acima da média ({accel:.1f}x)")
+        elif accel > 1: score -= 3;  greens.append(f"Volume crescendo ({accel:.1f}x)")
+        elif accel < 0.5: score += 8; yellows.append("Volume desacelerando")
 
     # Idade
     age = data["age"]
-    if   age <= 10: score -= 8;  greens.append(f"✨ Ultra early ({age:.0f} min)")
+    if   age <= 8:  score -= 8;  greens.append(f"✨ Ultra early ({age:.0f} min)")
     elif age <= 20: score -= 12; greens.append(f"✨ Janela ideal ({age:.0f} min)")
-    elif age <= 30: score -= 5;  greens.append(f"Ainda cedo ({age:.0f} min)")
-    else:           score += 5;  yellows.append(f"Janela fechando ({age:.0f} min)")
+    elif age <= 35: score -= 5;  greens.append(f"Ainda cedo ({age:.0f} min)")
+    elif age <= 60: score += 5;  yellows.append(f"Janela fechando ({age:.0f} min)")
 
-    # Variação 1h — baixa = bom (ainda tem espaço)
+    # Variação 1h
     h1 = data["h1"]
-    if   h1 > 80:  score += 15; reds.append(f"+{h1:.0f}% em 1h — pump avançado")
-    elif h1 > 40:  score += 5;  yellows.append(f"+{h1:.0f}% em 1h — movimento forte")
-    elif h1 > 5:   score -= 8;  greens.append(f"✨ Início de movimento +{h1:.0f}% em 1h")
-    else:          score -= 5;  greens.append(f"Token praticamente flat +{h1:.0f}% — máximo potencial")
+    if   h1 > 100: score += 15; reds.append(f"+{h1:.0f}% em 1h — pump avançado")
+    elif h1 > 50:  score += 8;  yellows.append(f"+{h1:.0f}% em 1h — forte")
+    elif h1 > 10:  score -= 5;  greens.append(f"Movimento saudável +{h1:.0f}% em 1h")
+    elif h1 > 3:   score -= 8;  greens.append(f"✨ Início de movimento +{h1:.0f}% em 1h")
 
     # Variação 5min
     m5 = data["m5"]
-    if   m5 > 14:  score += 5;  yellows.append(f"+{m5:.0f}% em 5min — acelerando")
-    elif m5 >= 4:  score -= 8;  greens.append(f"Subindo +{m5:.0f}% em 5min")
+    if   m5 > 20: score += 8;  yellows.append(f"+{m5:.0f}% em 5min — acelerando")
+    elif m5 >= 5: score -= 8;  greens.append(f"Subindo +{m5:.0f}% em 5min")
+    elif m5 >= 2: score -= 4;  greens.append(f"Alta suave +{m5:.0f}% em 5min")
 
     score = max(0, min(100, score))
 
-    if score <= 30:
+    if score <= 35:
         return dict(score=score, emoji="🟢", label="SINAL VERDE",
-                    desc="Alta probabilidade — entre com confiança",
+                    desc="Alta probabilidade — boa janela de entrada",
                     greens=greens, yellows=yellows, reds=reds)
-    elif score <= 60:
+    elif score <= 65:
         return dict(score=score, emoji="🟡", label="SINAL AMARELO",
                     desc="Potencial — defina stop loss antes de entrar",
                     greens=greens, yellows=yellows, reds=reds)
@@ -404,21 +329,17 @@ def risk_score(data: dict, flags: list, fail: str, momentum_desc: str) -> dict:
                     greens=greens, yellows=yellows, reds=reds)
 
 # ============================================================
-# ESTÁGIO 1 — SCAN DEX
+# SCAN DEX — triagem rápida
 # ============================================================
 
 def passes_filters(pair: dict):
     if pair.get("chainId") != "solana":
         return False, None
 
-    base = pair.get("baseToken", {})
-    addr = base.get("address")
+    base  = pair.get("baseToken", {})
+    addr  = base.get("address")
     if not addr or addr in seen_tokens:
         return False, None
-
-    with blacklist_lock:
-        if addr in blacklist:
-            return False, None
 
     liq   = pair.get("liquidity", {}).get("usd", 0) or 0
     vol5m = pair.get("volume",    {}).get("m5",  0) or 0
@@ -436,33 +357,23 @@ def passes_filters(pair: dict):
     created = pair.get("pairCreatedAt")
     age     = ((time.time() * 1000 - created) / 60_000) if created else 999
 
-    if not price:                           return False, None
-    if liq   < MIN_LIQ or liq > MAX_LIQ:   return False, None
-    if mc    > MAX_MC and mc > 0:           return False, None  # MC alto = tarde demais
-    if buys  < MIN_BUYS:                    return False, None
-    if buys  > MAX_BUYS:                    return False, None
-    if ratio < MIN_RATIO:                   return False, None
-    if sells < MIN_SELLS:                   return False, None
-    if vol5m < MIN_VOL:                     return False, None
-    if age   < MIN_AGE or age > MAX_AGE:    return False, None
-    if m5    < MIN_M5  or m5 > MAX_M5:      return False, None
-    if h1    < MIN_H1  or h1 > MAX_H1:      return False, None
-    if sells / buys < MIN_SEL_RATE:         return False, None
-
-    # Aceleração de volume
-    if vol1h > 0:
-        accel = vol5m / max(vol1h / 12, 1)
-        if accel < 1.0: return False, None
-
-    # Atualiza histórico de momentum
-    update_momentum(addr, buys, vol5m, float(price))
+    if not price:                              return False, None
+    if liq   < MIN_LIQ or liq > MAX_LIQ:      return False, None
+    if mc > 0 and mc > MAX_MC:                return False, None
+    if buys  < MIN_BUYS or buys > MAX_BUYS:   return False, None
+    if ratio < MIN_RATIO:                      return False, None
+    if sells < MIN_SELLS:                      return False, None
+    if sells > 0 and sells/buys < MIN_SEL_RATE: return False, None
+    if vol5m < MIN_VOL:                        return False, None
+    if age   < MIN_AGE or age > MAX_AGE:       return False, None
+    if m5    < MIN_M5  or m5 > MAX_M5:         return False, None
+    if h1    < MIN_H1  or h1 > MAX_H1:         return False, None
 
     return True, {
         "addr":   addr,
         "symbol": base.get("symbol", "???"),
         "price":  float(price),
         "liq":    liq,
-        "mc":     mc,
         "vol5m":  vol5m,
         "vol1h":  vol1h,
         "buys":   buys,
@@ -471,6 +382,7 @@ def passes_filters(pair: dict):
         "m5":     m5,
         "h1":     h1,
         "age":    age,
+        "mc":     mc,
         "dex_id": pair.get("dexId", "dex"),
     }
 
@@ -511,7 +423,7 @@ def scan_worker(worker_id: int):
         time.sleep(0.2)
 
 # ============================================================
-# ESTÁGIO 2 — VERIFICAÇÃO ON-CHAIN + MOMENTUM
+# ON-CHAIN WORKERS
 # ============================================================
 
 def onchain_worker():
@@ -524,20 +436,8 @@ def onchain_worker():
         addr   = data["addr"]
         symbol = data["symbol"]
 
-        # Aguarda 30s para confirmar que não é fake spike
-        time.sleep(30)
-
-        # Re-checa momentum após 30s
-        mom_ok, mom_desc = check_momentum(addr)
-        if not mom_ok:
-            print(f"[MOMENTUM] ${symbol} descartado — {mom_desc}")
-            with lock:
-                report_stats["blocked"] += 1
-            continue
-
-        # Verificação on-chain com cache e fallback
         g = fetch_gmgn(addr)
-        passed, fail_reason, flags = check_safety(g, addr)
+        passed, fail_reason, flags = check_safety(g)
 
         if not passed:
             print(f"[BLOCK] ${symbol} — {fail_reason}")
@@ -545,7 +445,7 @@ def onchain_worker():
                 report_stats["blocked"] += 1
             continue
 
-        risk = risk_score(data, flags, fail_reason, mom_desc)
+        risk = risk_score(data, flags, fail_reason)
 
         with lock:
             monitored_tokens[addr] = {
@@ -561,13 +461,11 @@ def onchain_worker():
             elif "AMAR" in risk["label"]: report_stats["yellow"] += 1
             else:                         report_stats["red"]    += 1
 
-        # Links
         gmgn_url   = f"https://gmgn.ai/sol/token/{addr}"
         dex_url    = f"https://dexscreener.com/solana/{addr}"
         trojan_url = f"https://t.me/solana_trojan_bot?start=r-user_{addr}"
         pump_url   = f"https://pump.fun/{addr}"
 
-        # Barras visuais
         strength    = min(int(data["ratio"]), 10)
         bar_force   = "🟢" * strength + "⚪" * (10 - strength)
         risk_filled = min(int(risk["score"] / 10), 10)
@@ -580,18 +478,18 @@ def onchain_worker():
         for f in risk["reds"][:2]:    analysis += f"\n🚫 {f}"
 
         smart  = g.get("smart", 0)
-        sm_line = f"🧠 Smart Money: `{smart} wallets`\n" if smart > 0 else ""
-        h_line  = f"👥 Holders: `{g.get('holders', '?')}`\n"
+        hlds   = g.get("holders", "?")
+        lp     = g.get("lp_burn", 0)
+        lp_pct = (float(lp)*100 if float(lp)<=1 else float(lp)) if lp else 0
+        mc     = data.get("mc", 0)
 
-        lp = float(g.get("lp_burn", 0))
-        lp_pct = lp * 100 if lp <= 1 else lp
+        sm_line = f"🧠 Smart Money: `{smart} wallets`\n" if smart > 0 else "🧠 Smart Money: `aguardando dados`\n"
+        h_line  = f"👥 Holders: `{hlds}`\n"
         lp_line = f"🔒 LP queimada: `{lp_pct:.0f}%`\n" if lp_pct > 0 else ""
-
-        mc = data.get("mc", 0)
-        mc_line = f"💹 Market Cap: `${mc:,.0f}`\n" if mc > 0 else ""
+        mc_line = f"📦 Market Cap: `${mc:,.0f}`\n" if mc > 0 else ""
 
         tips = {
-            "🟢": "💡 Sinal limpo com momentum confirmado — boa entrada",
+            "🟢": "💡 Sinal limpo — boa janela de entrada",
             "🟡": "💡 Entre com cautela — defina stop loss antes",
             "🔴": "💡 Risco alto — evite ou aguarde confirmação",
         }
@@ -604,11 +502,10 @@ def onchain_worker():
             f"💲 Preço:    `${data['price']:.10f}`\n"
             f"📈 Var 5m:  `{data['m5']:+.1f}%`  |  Var 1h: `{data['h1']:+.1f}%`\n"
             f"💧 Liq:      `${data['liq']:,.0f}`\n"
-            f"{mc_line}"
             f"📊 Vol 5m:  `${data['vol5m']:,.0f}`\n"
             f"🔥 Compras: `{data['buys']}` | Vendas: `{data['sells']}` | Ratio: `{data['ratio']:.1f}x`\n"
             f"⏰ Idade:   `{data['age']:.0f} min`\n"
-            f"{sm_line}{h_line}{lp_line}\n"
+            f"{mc_line}{sm_line}{h_line}{lp_line}\n"
             f"💪 Força compradora:\n{bar_force}\n\n"
             f"🎯 Score de risco: `{risk['score']}/100`\n"
             f"{bar_risk}"
@@ -620,7 +517,7 @@ def onchain_worker():
         send(msg)
 
 # ============================================================
-# MONITOR DE SAÍDA — a cada 3 min
+# MONITOR DE SAÍDA
 # ============================================================
 
 def monitor_exit():
@@ -681,9 +578,9 @@ def monitor_exit():
                     exit_msg = (
                         f"⚠️ *DUMP DETECTADO*\n\n"
                         f"💎 *${info['symbol']}* — `{sells}` vendas/5min\n"
-                        f"📉 Var desde alerta: `{pct:+.1f}%`\n"
+                        f"📉 Desde alerta: `{pct:+.1f}%`\n"
                         f"🔍 Possível saída de baleias!\n\n"
-                        f"🔗 [VER NO DEX](https://dexscreener.com/solana/{addr})"
+                        f"🔗 [DEX](https://dexscreener.com/solana/{addr})"
                     )
 
                 if exit_msg:
@@ -742,7 +639,7 @@ def performance_report():
                 current = prices.get(addr, 0)
                 if current > 0 and entry > 0:
                     pct = ((current - entry) / entry) * 100
-                    row = (pct, info["symbol"], info.get("signal",""), info.get("score", 50))
+                    row = (pct, info["symbol"], info.get("signal",""), info.get("score",50))
                     (winners if pct >= 0 else losers).append(row)
                 else:
                     no_data.append(info["symbol"])
@@ -756,11 +653,9 @@ def performance_report():
             report = (
                 f"📊 *RELATÓRIO — {now}*\n"
                 f"{'─' * 30}\n"
-                f"📤 Alertas: `{stats['sent']}` | "
-                f"🚫 Bloqueados: `{stats['blocked']}`\n"
+                f"📤 Alertas: `{stats['sent']}` | 🚫 Bloq: `{stats['blocked']}`\n"
                 f"🟢`{stats['green']}` 🟡`{stats['yellow']}` 🔴`{stats['red']}`\n"
-                f"🎯 Acerto: `{hit_rate:.0f}%` "
-                f"(`{len(winners)}` ↑ / `{len(losers)}` ↓)\n"
+                f"🎯 Acerto: `{hit_rate:.0f}%` (`{len(winners)}` ↑ / `{len(losers)}` ↓)\n"
                 f"{'─' * 30}\n\n"
             )
 
@@ -768,7 +663,7 @@ def performance_report():
                 report += f"🚀 *VALORIZARAM ({len(winners)})*\n"
                 for pct, sym, sig, sc in winners[:15]:
                     icon   = "🟢" if "VERDE" in sig else ("🟡" if "AMAR" in sig else "🔴")
-                    blocks = "█" * min(int(abs(pct) / 20), 8)
+                    blocks = "█" * min(int(abs(pct)/20), 8)
                     report += f"  {icon} `{pct:+6.1f}%` {blocks} *${sym}*\n"
                 report += "\n"
 
@@ -781,9 +676,9 @@ def performance_report():
 
             for label, key in [("🟢 Verdes", "VERDE"), ("🟡 Amarelos", "AMAR")]:
                 w = sum(1 for x in winners if key in x[2])
-                t = sum(1 for x in winners + losers if key in x[2])
+                t = sum(1 for x in winners+losers if key in x[2])
                 if t:
-                    report += f"{label}: `{w}/{t}` (`{w/t*100:.0f}%` acerto)\n"
+                    report += f"{label}: `{w}/{t}` (`{w/t*100:.0f}%`)\n"
 
             if no_data:
                 report += f"\n❓ Sem dados: {', '.join('$'+s for s in no_data[:6])}\n"
@@ -799,13 +694,6 @@ def performance_report():
                     for k in list(monitored_tokens.keys())[:-300]:
                         del monitored_tokens[k]
 
-            # Limpa cache GMGN antigo
-            with gmgn_cache_lock:
-                now_ts = time.time()
-                for k in list(gmgn_cache.keys()):
-                    if now_ts - gmgn_cache[k]["ts"] > GMGN_CACHE_TTL * 2:
-                        del gmgn_cache[k]
-
         except Exception as e:
             print(f"[REPORT] {e}")
         time.sleep(REPORT_INTERVAL)
@@ -818,12 +706,10 @@ def performance_report():
 def health():
     with lock:
         return (
-            f"WHALE SNIPER ELITE | "
+            f"WHALE SNIPER PRO | "
             f"Alertas: {len(monitored_tokens)} | "
-            f"Fila onchain: {onchain_queue.qsize()} | "
-            f"Fila TG: {alert_queue.qsize()} | "
-            f"Cache GMGN: {len(gmgn_cache)} | "
-            f"Blacklist: {len(blacklist)} | "
+            f"Fila: {onchain_queue.qsize()} | "
+            f"TG: {alert_queue.qsize()} | "
             f"Bloq: {report_stats['blocked']} | "
             f"🟢{report_stats['green']} "
             f"🟡{report_stats['yellow']} "
@@ -835,7 +721,23 @@ def health():
 # ============================================================
 
 if __name__ == "__main__":
-    print("🏦 WHALE SNIPER ELITE — ONLINE")
+    print("🏦 WHALE SNIPER PRO — ONLINE")
+    send(
+        "🟢 *WHALE SNIPER PRO — ONLINE*\n\n"
+        f"⚡ `{SCAN_WORKERS}` scan workers | `{ONCHAIN_WORKERS}` on-chain workers\n"
+        f"🔄 `{len(ENDPOINTS)}` endpoints simultâneos\n\n"
+        "🛡️ *Filtros ativos:*\n"
+        f"  🐋 Compras: `{MIN_BUYS}–{MAX_BUYS}` /5min\n"
+        f"  📊 Ratio: `{MIN_RATIO}x` mínimo\n"
+        f"  💧 Liq: `${MIN_LIQ:,}–${MAX_LIQ:,}`\n"
+        f"  📈 Var 5m: `{MIN_M5:.0f}%–{MAX_M5:.0f}%`\n"
+        f"  📈 Var 1h: `{MIN_H1:.0f}%–{MAX_H1:.0f}%`\n"
+        f"  ⏰ Idade: `{MIN_AGE}–{MAX_AGE} min`\n"
+        f"  📦 MC máx: `${MAX_MC:,}`\n\n"
+        "🔬 On-chain: honeypot, LP, holders, dev, smart money\n"
+        "🚨 Monitor de saída: stop -20% | take profit +60%\n"
+        "📢 Relatório a cada 2h"
+    )
 
     threading.Thread(target=telegram_sender,    daemon=True).start()
     threading.Thread(target=monitor_exit,       daemon=True).start()
@@ -850,3 +752,5 @@ if __name__ == "__main__":
         time.sleep(0.05)
 
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+PYEOF
+python3 -c "import ast; ast.parse(open('/mnt/user-data/outputs/whale_sniper_bot.py').read()); print('✅ Sintaxe OK')"

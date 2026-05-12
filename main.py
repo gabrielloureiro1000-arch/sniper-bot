@@ -53,30 +53,30 @@ bot = telebot.TeleBot(
 app = Flask(__name__)
 
 # ============================================================
-# FILTROS
+# FILTROS (RELAXADOS)
 # ============================================================
 
-MIN_LIQ = 5000
-MAX_LIQ = 500000
+MIN_LIQ = 1000
+MAX_LIQ = 1000000
 
-MIN_BUYS = 4
-MAX_BUYS = 1500
+MIN_BUYS = 1
+MAX_BUYS = 5000
 
-MIN_RATIO = 1.2
-MIN_SELLS = 1
+MIN_RATIO = 1.0
+MIN_SELLS = 0
 
-MIN_VOL = 250
+MIN_VOL = 50
 
-MIN_AGE = 1
-MAX_AGE = 90
+MIN_AGE = 0
+MAX_AGE = 300
 
-MIN_M5 = -8
-MAX_M5 = 80
+MIN_M5 = -50
+MAX_M5 = 500
 
-MIN_H1 = -20
-MAX_H1 = 400
+MIN_H1 = -80
+MAX_H1 = 1000
 
-MAX_FDV = 5000000
+MAX_FDV = 100000000
 
 # ============================================================
 # PERFORMANCE
@@ -84,7 +84,7 @@ MAX_FDV = 5000000
 
 SCAN_WORKERS = 6
 FETCH_TIMEOUT = 4
-SCAN_DELAY = 0.7
+SCAN_DELAY = 1
 REPORT_INTERVAL = 7200
 MAX_SEEN = 30000
 
@@ -113,13 +113,6 @@ seen_tokens = deque(maxlen=MAX_SEEN)
 seen_lookup = set()
 
 monitored_tokens = {}
-
-report_stats = {
-    "sent": 0,
-    "green": 0,
-    "yellow": 0,
-    "red": 0,
-}
 
 lock = threading.Lock()
 
@@ -163,11 +156,13 @@ def telegram_sender():
                         disable_web_page_preview=True
                     )
 
+                    print("TOKEN ENVIADO TELEGRAM")
+
                     break
 
                 except Exception as e:
 
-                    print(f"[TG] {attempt+1}: {e}")
+                    print(f"[TG ERROR] {e}")
 
                     time.sleep(1)
 
@@ -215,7 +210,10 @@ def fetch_gmgn_bonus(addr):
             "rug": d.get("rug_ratio", 0) or 0,
         }
 
-    except:
+    except Exception as e:
+
+        print(f"[GMGN ERROR] {e}")
+
         return {}
 
 # ============================================================
@@ -224,25 +222,30 @@ def fetch_gmgn_bonus(addr):
 
 def is_hard_rug(g):
 
-    if g.get("honeypot") is True:
-        return True
+    try:
 
-    if g.get("rug", 0) > 0.9:
-        return True
-
-    if g.get("sell_tax", 0) > 20:
-        return True
-
-    top10 = g.get("top10", 0)
-
-    if top10 > 0:
-
-        t = float(top10) * 100 if float(top10) <= 1 else float(top10)
-
-        if t > 80:
+        if g.get("honeypot") is True:
             return True
 
-    return False
+        if g.get("rug", 0) > 0.9:
+            return True
+
+        if g.get("sell_tax", 0) > 20:
+            return True
+
+        top10 = g.get("top10", 0)
+
+        if top10 > 0:
+
+            t = float(top10) * 100 if float(top10) <= 1 else float(top10)
+
+            if t > 80:
+                return True
+
+        return False
+
+    except:
+        return False
 
 # ============================================================
 # SCORE
@@ -250,27 +253,24 @@ def is_hard_rug(g):
 
 def calcular_score(data, g):
 
-    score = 55
+    score = 50
 
     if data["liq"] >= 30000:
-        score -= 8
-
-    if data["ratio"] >= 3:
         score -= 10
 
-    if data["ratio"] >= 6:
-        score -= 8
+    if data["ratio"] >= 2:
+        score -= 10
 
-    if data["whale_entry"]:
-        score -= 18
-
-    if data["fdv"] <= 250000:
-        score -= 12
-
-    if data["age"] <= 5:
-        score -= 12
+    if data["ratio"] >= 5:
+        score -= 10
 
     if data["vol5m"] >= 5000:
+        score -= 10
+
+    if data["fdv"] <= 250000:
+        score -= 10
+
+    if data["age"] <= 5:
         score -= 10
 
     smart = g.get("smart", 0)
@@ -281,26 +281,10 @@ def calcular_score(data, g):
     elif smart >= 2:
         score -= 10
 
-    holders = g.get("holders", 0)
-
-    if holders >= 150:
-        score -= 8
-
-    top10 = g.get("top10", 0)
-
-    if top10 > 0:
-
-        t = float(top10) * 100 if float(top10) <= 1 else float(top10)
-
-        if t > 50:
-            score += 15
-
-    score = max(0, min(100, score))
-
-    return score
+    return max(0, min(100, score))
 
 # ============================================================
-# FILTERS
+# TOKENS
 # ============================================================
 
 def already_seen(addr):
@@ -325,6 +309,10 @@ def mark_seen(addr):
 
         seen_lookup.add(addr)
 
+# ============================================================
+# FILTERS
+# ============================================================
+
 def passes_filters(pair):
 
     try:
@@ -345,7 +333,6 @@ def passes_filters(pair):
         liq = pair.get("liquidity", {}).get("usd", 0) or 0
 
         vol5m = pair.get("volume", {}).get("m5", 0) or 0
-        vol1h = pair.get("volume", {}).get("h1", 0) or 0
 
         tx = pair.get("txns", {}).get("m5", {})
 
@@ -368,44 +355,32 @@ def passes_filters(pair):
         age = ((time.time() * 1000 - created) / 60000) if created else 999
 
         if not price:
+            print("REJEITADO: SEM PREÇO")
             return False, None
 
         if liq < MIN_LIQ or liq > MAX_LIQ:
+            print(f"REJEITADO LIQ: {liq}")
             return False, None
 
         if buys < MIN_BUYS or buys > MAX_BUYS:
+            print(f"REJEITADO BUYS: {buys}")
             return False, None
 
         if ratio < MIN_RATIO:
-            return False, None
-
-        if sells < MIN_SELLS:
+            print(f"REJEITADO RATIO: {ratio}")
             return False, None
 
         if vol5m < MIN_VOL:
+            print(f"REJEITADO VOL: {vol5m}")
             return False, None
 
         if age < MIN_AGE or age > MAX_AGE:
-            return False, None
-
-        if m5 < MIN_M5 or m5 > MAX_M5:
-            return False, None
-
-        if h1 < MIN_H1 or h1 > MAX_H1:
+            print(f"REJEITADO AGE: {age}")
             return False, None
 
         if fdv > MAX_FDV:
+            print(f"REJEITADO FDV: {fdv}")
             return False, None
-
-        whale_entry = False
-
-        if (
-            buys >= 8 and
-            vol5m >= 1500 and
-            ratio >= 1.5 and
-            liq >= 10000
-        ):
-            whale_entry = True
 
         return True, {
             "addr": addr,
@@ -413,7 +388,6 @@ def passes_filters(pair):
             "price": float(price),
             "liq": liq,
             "vol5m": vol5m,
-            "vol1h": vol1h,
             "buys": buys,
             "sells": sells,
             "ratio": ratio,
@@ -421,10 +395,12 @@ def passes_filters(pair):
             "h1": h1,
             "age": age,
             "fdv": fdv,
-            "whale_entry": whale_entry,
         }
 
-    except:
+    except Exception as e:
+
+        print(f"[FILTER ERROR] {e}")
+
         return False, None
 
 # ============================================================
@@ -447,7 +423,10 @@ def fetch_pairs(url):
 
         return data.get("pairs") or []
 
-    except:
+    except Exception as e:
+
+        print(f"[FETCH ERROR] {e}")
+
         return []
 
 # ============================================================
@@ -460,217 +439,110 @@ def scan_worker(worker_id):
 
     while True:
 
-        url = ENDPOINTS[ep_index % len(ENDPOINTS)]
+        try:
 
-        ep_index += 1
+            url = ENDPOINTS[ep_index % len(ENDPOINTS)]
 
-        pairs = fetch_pairs(url)
+            ep_index += 1
 
-        for pair in pairs:
+            print(f"ESCANEANDO: {url}")
 
-            ok, data = passes_filters(pair)
+            pairs = fetch_pairs(url)
 
-            if not ok:
-                continue
+            print(f"PAIRS ENCONTRADOS: {len(pairs)}")
 
-            addr = data["addr"]
+            for pair in pairs:
 
-            g = fetch_gmgn_bonus(addr)
+                ok, data = passes_filters(pair)
 
-            if is_hard_rug(g):
-                continue
+                if not ok:
+                    continue
 
-            mark_seen(addr)
+                addr = data["addr"]
 
-            score = calcular_score(data, g)
+                g = fetch_gmgn_bonus(addr)
 
-            if score <= 25:
-                emoji = "🚨"
-                label = "GEM DETECTADA"
+                if is_hard_rug(g):
+                    print("RUG DETECTADO")
+                    continue
 
-            elif score <= 40:
-                emoji = "🟢"
-                label = "SINAL VERDE"
+                mark_seen(addr)
 
-            elif score <= 65:
-                emoji = "🟡"
-                label = "SINAL AMARELO"
+                score = calcular_score(data, g)
 
-            else:
-                emoji = "🔴"
-                label = "SINAL VERMELHO"
+                if score <= 25:
+                    emoji = "🚨"
+                    label = "GEM DETECTADA"
 
-            with lock:
+                elif score <= 40:
+                    emoji = "🟢"
+                    label = "SINAL VERDE"
 
-                monitored_tokens[addr] = {
-                    "symbol": data["symbol"],
-                    "price_entry": data["price"],
-                    "time": time.time(),
-                }
+                elif score <= 65:
+                    emoji = "🟡"
+                    label = "SINAL AMARELO"
 
-                report_stats["sent"] += 1
+                else:
+                    emoji = "🔴"
+                    label = "SINAL VERMELHO"
 
-            gmgn_url = f"https://gmgn.ai/sol/token/{addr}"
-            dex_url = f"https://dexscreener.com/solana/{addr}"
-            pump_url = f"https://pump.fun/{addr}"
-            photon_url = f"https://photon-sol.tinyastro.io/en/lp/{addr}"
-            trojan_url = f"https://t.me/solana_trojan_bot?start=r-user_{addr}"
+                gmgn_url = f"https://gmgn.ai/sol/token/{addr}"
 
-            whale_text = ""
+                msg = (
+                    f"{emoji} *{escape_md(label)}*\n\n"
 
-            if data["whale_entry"]:
-                whale_text = "🐋 Whale Entry: SIM\n"
+                    f"💎 *{escape_md(data['symbol'])}*\n"
+                    f"`{escape_md(addr)}`\n\n"
 
-            smart = g.get("smart", 0)
-            holders = g.get("holders", 0)
+                    f"💲 Price: `${data['price']:.10f}`\n"
+                    f"💧 Liquidity: `${data['liq']:,.0f}`\n"
+                    f"📊 Vol 5m: `${data['vol5m']:,.0f}`\n"
 
-            msg = (
-                f"{emoji} *{escape_md(label)}*\n\n"
+                    f"🔥 Buys: `{data['buys']}`\n"
+                    f"🔻 Sells: `{data['sells']}`\n"
 
-                f"💎 *\\${escape_md(data['symbol'])}*\n"
-                f"📄 `{escape_md(addr)}`\n\n"
+                    f"⚖️ Ratio: `{data['ratio']:.1f}x`\n"
 
-                f"💲 Price: `${data['price']:.10f}`\n"
-                f"💧 Liquidity: `${data['liq']:,.0f}`\n"
-                f"💰 FDV: `${data['fdv']:,.0f}`\n"
+                    f"⏰ Age: `{data['age']:.0f} min`\n"
 
-                f"📈 5m: `{data['m5']:+.1f}%`\n"
-                f"📈 1h: `{data['h1']:+.1f}%`\n"
+                    f"🎯 Score: `{score}/100`\n\n"
 
-                f"📊 Vol 5m: `${data['vol5m']:,.0f}`\n"
+                    f"🔗 [GMGN]({gmgn_url})"
+                )
 
-                f"🔥 Buys: `{data['buys']}`\n"
-                f"🔻 Sells: `{data['sells']}`\n"
+                print(f"TOKEN APROVADO: {data['symbol']}")
 
-                f"⚖️ Ratio: `{data['ratio']:.1f}x`\n"
+                send(msg)
 
-                f"⏰ Age: `{data['age']:.0f} min`\n\n"
+            time.sleep(SCAN_DELAY)
 
-                f"{escape_md(whale_text)}"
+        except Exception as e:
 
-                f"🧠 Smart Wallets: `{smart}`\n"
-                f"👥 Holders: `{holders}`\n"
+            print(f"[WORKER ERROR] {e}")
 
-                f"🎯 Score: `{score}/100`\n\n"
-
-                f"━━━━━━━━━━━━━━━\n"
-                f"💰 *TARGETS*\n"
-                f"━━━━━━━━━━━━━━━\n"
-
-                f"🛑 Stop Loss: `-12%`\n"
-                f"🎯 Parcial: `+25%`\n"
-                f"🚀 Total: `+80%`\n\n"
-
-                f"🔗 [GMGN]({gmgn_url})"
-                f" | [DEX]({dex_url})"
-                f" | [PHOTON]({photon_url})"
-                f" | [PUMP]({pump_url})\n\n"
-
-                f"⚡ [TROJAN]({trojan_url})"
-            )
-
-            send(msg)
-
-        time.sleep(SCAN_DELAY)
+            time.sleep(2)
 
 # ============================================================
 # REPORT
 # ============================================================
 
-def fetch_prices_batch(addrs):
-
-    try:
-
-        r = session.get(
-            f"https://api.dexscreener.com/latest/dex/tokens/{','.join(addrs)}",
-            timeout=10
-        )
-
-        data = r.json()
-
-        return {
-            p["baseToken"]["address"]: float(p["priceUsd"])
-            for p in (data.get("pairs") or [])
-            if p.get("baseToken", {}).get("address")
-            and p.get("priceUsd")
-        }
-
-    except:
-        return {}
-
 def performance_report():
-
-    time.sleep(REPORT_INTERVAL)
 
     while True:
 
         try:
 
-            with lock:
-                snap = dict(monitored_tokens)
-
-            if not snap:
-                time.sleep(REPORT_INTERVAL)
-                continue
-
-            addrs = list(snap.keys())
-
-            batches = [
-                addrs[i:i+30]
-                for i in range(0, len(addrs), 30)
-            ]
-
-            prices = {}
-
-            with ThreadPoolExecutor(max_workers=4) as ex:
-
-                futures = [
-                    ex.submit(fetch_prices_batch, b)
-                    for b in batches
-                ]
-
-                for f in as_completed(futures):
-                    prices.update(f.result())
-
-            winners = 0
-            losers = 0
-
-            for addr, info in snap.items():
-
-                current = prices.get(addr)
-
-                if not current:
-                    continue
-
-                pct = (
-                    (
-                        current - info["price_entry"]
-                    ) / info["price_entry"]
-                ) * 100
-
-                if pct >= 0:
-                    winners += 1
-                else:
-                    losers += 1
-
-            total = winners + losers
-
-            hit_rate = (
-                (winners / total) * 100
-            ) if total else 0
-
             report = (
                 f"📊 *RELATÓRIO*\n\n"
-                f"🟢 Winners: `{winners}`\n"
-                f"🔴 Losers: `{losers}`\n"
-                f"🎯 Win Rate: `{hit_rate:.0f}%`"
+                f"🤖 Scanner Online\n"
+                f"📡 Tokens Monitorados: `{len(monitored_tokens)}`"
             )
 
             send(report)
 
         except Exception as e:
 
-            print(f"[REPORT] {e}")
+            print(f"[REPORT ERROR] {e}")
 
         time.sleep(REPORT_INTERVAL)
 
@@ -681,10 +553,7 @@ def performance_report():
 @app.route("/")
 def health():
 
-    return (
-        f"WHALE SNIPER ONLINE | "
-        f"Alertas: {len(monitored_tokens)}"
-    )
+    return "BOT ONLINE"
 
 # ============================================================
 # MAIN
@@ -692,14 +561,11 @@ def health():
 
 if __name__ == "__main__":
 
-    print("WHALE SNIPER ONLINE")
+    print("BOT ONLINE")
 
     send(
-        "🚀 *WHALE SNIPER ONLINE*\n\n"
-        "🐋 Whale Detection\n"
-        "🧠 Smart Money\n"
-        "💎 Gem Finder\n"
-        "⚡ Solana Scanner"
+        "🚀 *BOT ONLINE*\n\n"
+        "Scanner iniciado com sucesso"
     )
 
     threading.Thread(

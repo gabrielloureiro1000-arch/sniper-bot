@@ -1,6 +1,3 @@
-# WHALE QUANT SNIPER V3 — COPY AND PASTE
-
-```python
 import os
 import time
 import threading

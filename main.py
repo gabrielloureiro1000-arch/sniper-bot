@@ -9,7 +9,8 @@ from queue import Queue, Empty
 from datetime import datetime
 
 # ============================================================
-# CONFIG
+# WHALE FLOW QUANT X
+# VERSION 2026 — INSTITUTIONAL MEMECOIN ENGINE
 # ============================================================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -19,47 +20,73 @@ CHAT_ID        = os.getenv("CHAT_ID")
 # AJUSTES PROFISSIONAIS
 # ============================================================
 
-# MAIS TOKENS SEM VIRAR LIXO
-MIN_LIQ        = 15000
-MAX_LIQ        = 350000
+# ENTRAR ANTES DO VAREJO
+MIN_MC            = 7000
+MAX_MC            = 180000
 
-MIN_BUYS       = 18
-MAX_BUYS       = 800
+# LIQUIDEZ IDEAL
+MIN_LIQ           = 8000
+MAX_LIQ           = 60000
 
-MIN_RATIO      = 1.4
+# BALEIAS
+MIN_BUYS          = 18
+MAX_BUYS          = 450
 
-MIN_VOL5M      = 4000
+# PRESSÃO COMPRADORA
+MIN_RATIO         = 1.8
 
-MIN_M5         = 2
-MAX_M5         = 45
+# VOLUME
+MIN_VOL5M         = 2500
 
-MIN_H1         = 5
-MAX_H1         = 250
+# TOKEN NOVO
+MIN_AGE           = 1
+MAX_AGE           = 25
 
-MIN_AGE        = 2
-MAX_AGE        = 45
+# MOVIMENTO
+MIN_M5            = 1
+MAX_M5            = 35
 
-MAX_MC         = 4000000
+MIN_H1            = 2
+MAX_H1            = 120
+
+# SMART MONEY
+MIN_SMART_MONEY   = 2
+
+# HOLDERS
+MIN_HOLDERS       = 45
+
+# TOP HOLDERS
+MAX_TOP10         = 0.35
+
+# DEV
+MAX_DEV_HOLD      = 0.08
+
+# RELATORIO
+REPORT_INTERVAL   = 7200
+
+# WORKERS
+SCAN_WORKERS      = 14
 
 # ============================================================
-# VELOCIDADE
-# ============================================================
-
-SCAN_WORKERS   = 10
-FETCH_TIMEOUT  = 6
-REPORT_TIME    = 7200  # 2 HORAS
-
-# ============================================================
-# DEX ENDPOINTS
+# ENDPOINTS
 # ============================================================
 
 ENDPOINTS = [
+
     "https://api.dexscreener.com/latest/dex/search?q=solana",
-    "https://api.dexscreener.com/latest/dex/search?q=solana+new",
-    "https://api.dexscreener.com/latest/dex/search?q=sol+pump",
+
+    "https://api.dexscreener.com/latest/dex/search?q=sol+new",
+
+    "https://api.dexscreener.com/latest/dex/search?q=pumpfun",
+
     "https://api.dexscreener.com/latest/dex/search?q=solana+meme",
-    "https://api.dexscreener.com/latest/dex/search?q=solana+moon",
+
     "https://api.dexscreener.com/latest/dex/search?q=sol+gem",
+
+    "https://api.dexscreener.com/latest/dex/search?q=raydium",
+
+    "https://api.dexscreener.com/latest/dex/search?q=moonshot",
+
 ]
 
 # ============================================================
@@ -67,13 +94,17 @@ ENDPOINTS = [
 # ============================================================
 
 seen_tokens = set()
-monitored   = {}
 
-lock        = threading.Lock()
+monitored_tokens = {}
 
-alert_queue = Queue(maxsize=1000)
+lock = threading.Lock()
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
+alert_queue = Queue(maxsize=2000)
+
+bot = telebot.TeleBot(
+    TELEGRAM_TOKEN,
+    threaded=False
+)
 
 app = Flask(__name__)
 
@@ -127,53 +158,93 @@ def fetch_gmgn(addr):
 
     try:
 
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://gmgn.ai/"
+        }
+
         r = requests.get(
             f"https://gmgn.ai/api/v1/token/sol/{addr}",
             timeout=6,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            }
+            headers=headers
         )
 
         if r.status_code != 200:
             return {}
 
-        d = r.json().get("data", {})
+        d = r.json().get("data", {}) or {}
 
         return {
+
             "holders": d.get("holder_count", 0),
+
             "smart": d.get("smart_degen_count", 0),
+
             "top10": d.get("top10_holder_rate", 1),
+
             "lp": d.get("burn_ratio", 0),
+
             "honeypot": d.get("is_honeypot", False),
+
             "mintable": d.get("is_mintable", False),
+
+            "dev": d.get("dev_token_burn_ratio", 0),
+
         }
 
     except:
         return {}
 
 # ============================================================
-# SCORE
+# SCORE ENGINE
 # ============================================================
 
-def calculate_score(data, gmgn):
+def calculate_score(data, g):
 
-    score = 50
+    score = 0
+
+    reasons = []
 
     # ========================================================
     # SMART MONEY
     # ========================================================
 
-    smart = gmgn.get("smart", 0)
+    smart = g.get("smart", 0)
 
-    if smart >= 8:
-        score += 30
+    if smart >= 10:
 
-    elif smart >= 5:
-        score += 20
+        score += 35
+        reasons.append("🐋 whales fortes")
+
+    elif smart >= 6:
+
+        score += 25
+        reasons.append("🐋 smart money entrando")
 
     elif smart >= 2:
-        score += 10
+
+        score += 15
+        reasons.append("🐋 fluxo institucional")
+
+    # ========================================================
+    # HOLDERS
+    # ========================================================
+
+    holders = g.get("holders", 0)
+
+    if holders >= 250:
+
+        score += 20
+        reasons.append("👥 holders explodindo")
+
+    elif holders >= 120:
+
+        score += 12
+        reasons.append("👥 holders crescendo")
+
+    elif holders >= 60:
+
+        score += 6
 
     # ========================================================
     # BUY PRESSURE
@@ -181,10 +252,17 @@ def calculate_score(data, gmgn):
 
     ratio = data["ratio"]
 
-    if ratio >= 4:
-        score += 20
+    if ratio >= 5:
+
+        score += 25
+        reasons.append("📈 compra agressiva")
+
+    elif ratio >= 3:
+
+        score += 18
 
     elif ratio >= 2:
+
         score += 10
 
     # ========================================================
@@ -193,71 +271,75 @@ def calculate_score(data, gmgn):
 
     accel = data["vol5m"] / max(data["vol1h"] / 12, 1)
 
-    if accel >= 6:
+    if accel >= 10:
+
+        score += 30
+        reasons.append("🚀 volume parabólico")
+
+    elif accel >= 6:
+
         score += 20
+        reasons.append("🚀 volume acelerando")
 
     elif accel >= 3:
+
         score += 10
 
     # ========================================================
-    # AGE
+    # EARLY
     # ========================================================
 
-    if data["age"] <= 10:
-        score += 15
+    if data["age"] <= 5:
 
-    elif data["age"] <= 20:
-        score += 10
+        score += 20
+        reasons.append("⚡ ultra early")
 
-    # ========================================================
-    # HOLDERS
-    # ========================================================
+    elif data["age"] <= 12:
 
-    holders = gmgn.get("holders", 0)
-
-    if holders >= 200:
-        score += 10
-
-    elif holders >= 80:
-        score += 5
+        score += 12
 
     # ========================================================
-    # MC
+    # MARKET CAP
     # ========================================================
 
     mc = data["mc"]
 
-    if mc <= 150000:
-        score += 15
+    if mc <= 15000:
 
-    elif mc <= 500000:
+        score += 30
+        reasons.append("💎 microcap")
+
+    elif mc <= 40000:
+
+        score += 20
+
+    elif mc <= 90000:
+
         score += 10
 
     # ========================================================
     # RISK
     # ========================================================
 
-    if gmgn.get("honeypot"):
+    if g.get("honeypot"):
+
+        score -= 200
+
+    if g.get("mintable"):
+
         score -= 100
 
-    if gmgn.get("mintable"):
-        score -= 50
+    if g.get("top10", 1) > MAX_TOP10:
 
-    top10 = gmgn.get("top10", 1)
+        score -= 35
 
-    if top10 > 0.50:
-        score -= 15
+    if g.get("dev", 0) > MAX_DEV_HOLD:
 
-    lp = gmgn.get("lp", 0)
-
-    if lp < 0.20:
         score -= 30
 
-    # ========================================================
-    # LIMITS
-    # ========================================================
+    if g.get("lp", 0) < 0.20:
 
-    score = max(0, min(100, score))
+        score -= 50
 
     # ========================================================
     # LABEL
@@ -267,7 +349,7 @@ def calculate_score(data, gmgn):
 
         signal = "🟢 VERDE"
 
-    elif score >= 60:
+    elif score >= 55:
 
         signal = "🟡 AMARELO"
 
@@ -275,13 +357,13 @@ def calculate_score(data, gmgn):
 
         signal = "🔴 VERMELHO"
 
-    return score, signal
+    return score, signal, reasons
 
 # ============================================================
-# FILTERS
+# FILTER ENGINE
 # ============================================================
 
-def passes(pair):
+def passes_filters(pair):
 
     if pair.get("chainId") != "solana":
         return False, None
@@ -298,14 +380,14 @@ def passes(pair):
         if addr in seen_tokens:
             return False, None
 
-    liq = pair.get("liquidity", {}).get("usd", 0) or 0
-
-    tx  = pair.get("txns", {}).get("m5", {})
+    tx = pair.get("txns", {}).get("m5", {})
 
     buys  = tx.get("buys", 0)
     sells = tx.get("sells", 1)
 
     ratio = buys / max(sells, 1)
+
+    liq = pair.get("liquidity", {}).get("usd", 0) or 0
 
     vol5m = pair.get("volume", {}).get("m5", 0) or 0
     vol1h = pair.get("volume", {}).get("h1", 0) or 0
@@ -324,6 +406,9 @@ def passes(pair):
 
     mc = pair.get("fdv") or pair.get("marketCap") or 0
 
+    if mc < MIN_MC or mc > MAX_MC:
+        return False, None
+
     if liq < MIN_LIQ or liq > MAX_LIQ:
         return False, None
 
@@ -336,32 +421,43 @@ def passes(pair):
     if vol5m < MIN_VOL5M:
         return False, None
 
+    if age < MIN_AGE or age > MAX_AGE:
+        return False, None
+
     if m5 < MIN_M5 or m5 > MAX_M5:
         return False, None
 
     if h1 < MIN_H1 or h1 > MAX_H1:
         return False, None
 
-    if age < MIN_AGE or age > MAX_AGE:
-        return False, None
-
-    if mc > MAX_MC:
-        return False, None
-
     return True, {
+
         "addr": addr,
+
         "symbol": base.get("symbol", "???"),
+
         "liq": liq,
+
         "buys": buys,
+
         "sells": sells,
+
         "ratio": ratio,
+
         "vol5m": vol5m,
+
         "vol1h": vol1h,
+
         "m5": m5,
+
         "h1": h1,
+
         "age": age,
+
         "mc": mc,
-        "price": float(pair.get("priceUsd", 0)),
+
+        "price": float(pair.get("priceUsd", 0))
+
     }
 
 # ============================================================
@@ -372,7 +468,7 @@ def fetch_pairs(url):
 
     try:
 
-        r = requests.get(url, timeout=FETCH_TIMEOUT)
+        r = requests.get(url, timeout=6)
 
         if r.status_code == 200:
 
@@ -384,57 +480,98 @@ def fetch_pairs(url):
     return []
 
 # ============================================================
-# ENTRY ALERT
+# TOKEN ANALYSIS
 # ============================================================
 
-def process_token(data):
+def analyze_token(data):
 
     addr = data["addr"]
 
-    gmgn = fetch_gmgn(addr)
+    g = fetch_gmgn(addr)
 
-    score, signal = calculate_score(data, gmgn)
+    # ========================================================
+    # GMGN FILTERS
+    # ========================================================
 
-    if score < 60:
+    if g:
+
+        if g.get("smart", 0) < MIN_SMART_MONEY:
+            return
+
+        if g.get("holders", 0) < MIN_HOLDERS:
+            return
+
+        if g.get("top10", 1) > MAX_TOP10:
+            return
+
+        if g.get("dev", 0) > MAX_DEV_HOLD:
+            return
+
+    score, signal, reasons = calculate_score(data, g)
+
+    if score < 55:
         return
 
-    monitored[addr] = {
+    monitored_tokens[addr] = {
+
         "symbol": data["symbol"],
+
         "entry": data["price"],
-        "time": time.time(),
+
+        "time": time.time()
+
     }
 
     accel = data["vol5m"] / max(data["vol1h"] / 12, 1)
 
     msg = (
 
-        f"{signal} *ENTRADA PROFISSIONAL*\n\n"
+        f"{signal} *WHALE ENTRY DETECTADA*\n\n"
 
         f"💎 *${data['symbol']}*\n"
+
         f"`{addr}`\n\n"
 
         f"💲 Preço: `${data['price']:.10f}`\n"
-        f"💧 Liquidez: `${data['liq']:,.0f}`\n"
-        f"📊 Volume 5m: `${data['vol5m']:,.0f}`\n"
-        f"🔥 Compras: `{data['buys']}`\n"
-        f"📉 Vendas: `{data['sells']}`\n"
-        f"⚖️ Ratio: `{data['ratio']:.1f}x`\n"
-        f"🚀 Aceleração: `{accel:.1f}x`\n"
-        f"📈 5m: `{data['m5']:+.1f}%`\n"
-        f"📈 1h: `{data['h1']:+.1f}%`\n"
-        f"⏰ Idade: `{data['age']:.0f} min`\n"
+
         f"📦 MC: `${data['mc']:,.0f}`\n"
-        f"🧠 Smart Wallets: `{gmgn.get('smart', 0)}`\n"
-        f"👥 Holders: `{gmgn.get('holders', '?')}`\n\n"
+
+        f"💧 Liquidez: `${data['liq']:,.0f}`\n"
+
+        f"📊 Volume 5m: `${data['vol5m']:,.0f}`\n"
+
+        f"🔥 Compras: `{data['buys']}`\n"
+
+        f"📉 Vendas: `{data['sells']}`\n"
+
+        f"⚖️ Ratio: `{data['ratio']:.1f}x`\n"
+
+        f"🚀 Aceleração: `{accel:.1f}x`\n"
+
+        f"📈 5m: `{data['m5']:+.1f}%`\n"
+
+        f"📈 1h: `{data['h1']:+.1f}%`\n"
+
+        f"⏰ Idade: `{data['age']:.0f} min`\n"
+
+        f"🐋 Smart Wallets: `{g.get('smart', 0)}`\n"
+
+        f"👥 Holders: `{g.get('holders', '?')}`\n"
+
+        f"🏦 Top 10: `{g.get('top10', 0)*100:.0f}%`\n\n"
 
         f"🎯 SCORE: `{score}/100`\n\n"
 
-        f"🟢 VERDE = forte probabilidade\n"
-        f"🟡 AMARELO = entrada moderada\n"
-        f"🔴 VERMELHO = risco elevado\n\n"
+        f"🧠 Sinais:\n"
+
+        + "\n".join([f"• {x}" for x in reasons[:5]])
+
+        + "\n\n"
 
         f"🔗 GMGN:\n"
+
         f"https://gmgn.ai/sol/token/{addr}"
+
     )
 
     send(msg)
@@ -457,7 +594,7 @@ def scan_worker(worker_id):
 
         for pair in pairs:
 
-            ok, data = passes(pair)
+            ok, data = passes_filters(pair)
 
             if not ok:
                 continue
@@ -470,18 +607,18 @@ def scan_worker(worker_id):
                 seen_tokens.add(data["addr"])
 
             threading.Thread(
-                target=process_token,
+                target=analyze_token,
                 args=(data,),
                 daemon=True
             ).start()
 
-        time.sleep(0.5)
+        time.sleep(0.3)
 
 # ============================================================
-# EXIT MONITOR
+# EXIT ENGINE
 # ============================================================
 
-def exit_monitor():
+def monitor_exit():
 
     time.sleep(180)
 
@@ -489,13 +626,13 @@ def exit_monitor():
 
         try:
 
-            for addr, info in list(monitored.items()):
+            for addr, info in list(monitored_tokens.items()):
 
                 try:
 
                     r = requests.get(
                         f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
-                        timeout=8
+                        timeout=6
                     )
 
                     pairs = r.json().get("pairs", [])
@@ -503,76 +640,80 @@ def exit_monitor():
                     if not pairs:
                         continue
 
-                    price = float(pairs[0].get("priceUsd", 0))
+                    p = float(pairs[0].get("priceUsd", 0))
 
-                    entry = info["entry"]
+                    pnl = (
+                        (p - info["entry"])
+                        / info["entry"]
+                    ) * 100
 
-                    if entry <= 0:
-                        continue
-
-                    pnl = ((price - entry) / entry) * 100
-
-                    # ====================================================
                     # TAKE PROFIT
-                    # ====================================================
 
-                    if pnl >= 70:
+                    if pnl >= 80:
 
                         send(
+
                             f"🤑 *TAKE PROFIT*\n\n"
+
                             f"💎 *${info['symbol']}*\n"
-                            f"📈 Lucro: `+{pnl:.1f}%`\n\n"
+
+                            f"📈 Resultado: `+{pnl:.1f}%`\n\n"
+
                             f"🔗 https://gmgn.ai/sol/token/{addr}"
+
                         )
 
-                        del monitored[addr]
+                        del monitored_tokens[addr]
 
-                    # ====================================================
                     # STOP LOSS
-                    # ====================================================
 
                     elif pnl <= -18:
 
                         send(
+
                             f"🚨 *STOP LOSS*\n\n"
+
                             f"💎 *${info['symbol']}*\n"
+
                             f"📉 Resultado: `{pnl:.1f}%`\n\n"
+
                             f"🔗 https://gmgn.ai/sol/token/{addr}"
+
                         )
 
-                        del monitored[addr]
+                        del monitored_tokens[addr]
 
                 except:
                     pass
 
-        except Exception as e:
-
-            print(f"[EXIT] {e}")
+        except:
+            pass
 
         time.sleep(120)
 
 # ============================================================
-# REPORT 2H
+# REPORT
 # ============================================================
 
 def report_worker():
 
     while True:
 
-        time.sleep(REPORT_TIME)
+        time.sleep(REPORT_INTERVAL)
 
-        try:
+        send(
 
-            send(
-                f"📊 *RELATÓRIO 2H*\n\n"
-                f"🤖 Scanner online\n"
-                f"📡 Tokens monitorados: `{len(monitored)}`\n"
-                f"⚡ Workers: `{SCAN_WORKERS}`\n"
-                f"🕒 {datetime.utcnow().strftime('%H:%M UTC')}"
-            )
+            f"📊 *RELATÓRIO 2H*\n\n"
 
-        except:
-            pass
+            f"🤖 Scanner online\n"
+
+            f"📡 Tokens monitorados: `{len(monitored_tokens)}`\n"
+
+            f"⚡ Workers: `{SCAN_WORKERS}`\n"
+
+            f"🕒 {datetime.utcnow().strftime('%H:%M UTC')}"
+
+        )
 
 # ============================================================
 # HEALTH
@@ -580,11 +721,11 @@ def report_worker():
 
 @app.route("/")
 
-def home():
+def health():
 
     return (
-        f"WHALE QUANT PRO X | "
-        f"Tokens: {len(monitored)}"
+        f"WHALE FLOW QUANT X | "
+        f"Tokens: {len(monitored_tokens)}"
     )
 
 # ============================================================
@@ -593,16 +734,24 @@ def home():
 
 if __name__ == "__main__":
 
-    print("WHALE QUANT PRO X ONLINE")
+    print("WHALE FLOW QUANT X ONLINE")
 
     send(
-        "🟢 *WHALE QUANT PRO X ONLINE*\n\n"
-        "🏦 Sistema Quantitativo Institucional\n"
-        "🐋 Detecção de fluxo de baleias\n"
-        "📈 Momentum + aceleração de volume\n"
-        "🛡️ Gestão automática de risco\n"
-        "⚡ Entrada ultra early\n"
-        "📊 Relatórios a cada 2 horas"
+
+        "🟢 *WHALE FLOW QUANT X ONLINE*\n\n"
+
+        "🏦 Quantitative Memecoin Engine\n"
+
+        "🐋 Whale flow detection\n"
+
+        "📈 Volume acceleration engine\n"
+
+        "⚡ Ultra early scanner\n"
+
+        "🛡️ Institutional filters enabled\n"
+
+        "📊 Reports every 2h"
+
     )
 
     threading.Thread(
@@ -611,7 +760,7 @@ if __name__ == "__main__":
     ).start()
 
     threading.Thread(
-        target=exit_monitor,
+        target=monitor_exit,
         daemon=True
     ).start()
 
@@ -628,7 +777,7 @@ if __name__ == "__main__":
             daemon=True
         ).start()
 
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     app.run(
         host="0.0.0.0",

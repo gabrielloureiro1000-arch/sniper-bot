@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import threading
 import requests
 import telebot
@@ -11,7 +12,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============================================================
-# CONFIG
+# WHALE HUNTER GMGN — INSTITUTIONAL VERSION
 # ============================================================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -22,30 +23,61 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 app = Flask(__name__)
 
 # ============================================================
-# FILTROS QUANT
+# SESSION
 # ============================================================
 
-MIN_LIQ      = 4_000
-MAX_LIQ      = 350_000
+session = requests.Session()
 
-MIN_BUYS     = 6
-MAX_BUYS     = 1200
+retries = Retry(
+    total=4,
+    backoff_factor=0.4,
+    status_forcelist=[429, 500, 502, 503, 504]
+)
 
-MIN_RATIO    = 1.25
-MIN_SELLS    = 1
+adapter = HTTPAdapter(
+    pool_connections=200,
+    pool_maxsize=200,
+    max_retries=retries
+)
 
-MIN_VOL      = 400
+session.mount("https://", adapter)
+session.mount("http://", adapter)
 
-MIN_AGE      = 0.2
-MAX_AGE      = 45
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
-MIN_M5       = 0.5
-MAX_M5       = 120.0
+# ============================================================
+# CONFIG — ULTRA EARLY
+# ============================================================
 
-MIN_H1       = -15.0
-MAX_H1       = 400.0
+MIN_LIQ        = 3000
+MAX_LIQ        = 180000
+
+MIN_VOL5M      = 250
+MIN_BUYS       = 4
+MAX_BUYS       = 1500
+
+MIN_RATIO      = 1.15
+
+MIN_AGE        = 0.15
+MAX_AGE        = 35
+
+MIN_M5         = 0.2
+MAX_M5         = 250
+
+MIN_H1         = -30
+MAX_H1         = 500
+
+MIN_HOLDERS    = 15
 
 REPORT_INTERVAL = 7200
+
+# ============================================================
+# SMART FILTERS
+# ============================================================
+
+MIN_WHALE_SCORE = 11
 
 # ============================================================
 # ENDPOINTS
@@ -61,32 +93,9 @@ ENDPOINTS = [
     "https://api.dexscreener.com/latest/dex/search?q=moonshot",
     "https://api.dexscreener.com/latest/dex/search?q=degen",
     "https://api.dexscreener.com/latest/dex/search?q=memecoin",
+    "https://api.dexscreener.com/latest/dex/search?q=sol+gem",
+    "https://api.dexscreener.com/latest/dex/search?q=solana+trending",
 ]
-
-# ============================================================
-# SESSION
-# ============================================================
-
-session = requests.Session()
-
-retries = Retry(
-    total=3,
-    backoff_factor=0.5,
-    status_forcelist=[429, 500, 502, 503, 504]
-)
-
-adapter = HTTPAdapter(
-    pool_connections=100,
-    pool_maxsize=100,
-    max_retries=retries
-)
-
-session.mount("https://", adapter)
-session.mount("http://", adapter)
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
 
 # ============================================================
 # STATE
@@ -95,12 +104,13 @@ HEADERS = {
 lock = threading.Lock()
 
 history = {}
+seen = {}
 
 stats = {
     "sent": 0,
     "green": 0,
     "yellow": 0,
-    "red": 0
+    "red": 0,
 }
 
 tg_queue = Queue()
@@ -139,7 +149,6 @@ def tg_worker():
         except Empty:
             continue
 
-
 def send(msg):
 
     try:
@@ -157,7 +166,7 @@ def get_gmgn(addr):
 
         r = session.get(
             f"https://gmgn.ai/api/v1/token/sol/{addr}",
-            timeout=4,
+            timeout=5,
             headers={
                 "User-Agent": "Mozilla/5.0",
                 "Referer": "https://gmgn.ai/"
@@ -184,13 +193,15 @@ def get_gmgn(addr):
             "rug": d.get("rug_ratio", 0) or 0,
 
             "hp": d.get("is_honeypot", False),
+
+            "dev": d.get("developer_holding_rate", 0) or 0
         }
 
     except:
         return {}
 
 # ============================================================
-# ANTI LIXO
+# ANTI RUG
 # ============================================================
 
 def is_lixo(g):
@@ -200,10 +211,10 @@ def is_lixo(g):
         if g.get("hp") is True:
             return True, "HONEYPOT"
 
-        if g.get("tax", 0) > 25:
+        if g.get("tax", 0) > 20:
             return True, "SELL TAX"
 
-        if g.get("rug", 0) > 0.85:
+        if g.get("rug", 0) > 0.80:
             return True, "RUG"
 
         top10 = g.get("top10", 0)
@@ -216,8 +227,21 @@ def is_lixo(g):
                 else float(top10)
             )
 
-            if t > 85:
+            if t > 80:
                 return True, "TOP10"
+
+        dev = g.get("dev", 0)
+
+        if dev:
+
+            d = (
+                float(dev) * 100
+                if float(dev) <= 1
+                else float(dev)
+            )
+
+            if d > 15:
+                return True, "DEV"
 
     except:
         pass
@@ -228,91 +252,124 @@ def is_lixo(g):
 # SCORE
 # ============================================================
 
-def sinal(data, g):
+def whale_score(data, g):
 
     pontos = 0
 
-    ratio = data["ratio"]
-    buys  = data["buys"]
-    age   = data["age"]
-    h1    = data["h1"]
+    buys   = data["buys"]
+    sells  = data["sells"]
+    ratio  = data["ratio"]
+    age    = data["age"]
+    m5     = data["m5"]
+    h1     = data["h1"]
+    accel  = data["accel"]
+
+    smart  = g.get("smart", 0)
+    holders = g.get("holders", 0)
+
+    # ========================================================
+    # BUY PRESSURE
+    # ========================================================
 
     if ratio >= 4:
-        pontos += 4
+        pontos += 5
     elif ratio >= 2:
-        pontos += 3
-    else:
-        pontos += 1
-
-    if buys >= 40:
         pontos += 4
-    elif buys >= 20:
-        pontos += 3
-    elif buys >= 10:
+    elif ratio >= 1.5:
         pontos += 2
 
-    if age <= 5:
+    # ========================================================
+    # WHALES
+    # ========================================================
+
+    if buys >= 40:
+        pontos += 5
+    elif buys >= 20:
+        pontos += 4
+    elif buys >= 10:
+        pontos += 3
+    elif buys >= 5:
+        pontos += 2
+
+    # ========================================================
+    # ULTRA EARLY
+    # ========================================================
+
+    if age <= 3:
+        pontos += 5
+    elif age <= 8:
         pontos += 4
     elif age <= 15:
         pontos += 3
-    elif age <= 30:
-        pontos += 2
 
-    if h1 <= 30:
+    # ========================================================
+    # MOMENTUM
+    # ========================================================
+
+    if m5 >= 20:
+        pontos += 4
+    elif m5 >= 10:
         pontos += 3
-    elif h1 <= 80:
+    elif m5 >= 3:
         pontos += 2
 
-    smart = g.get("smart", 0)
+    # ========================================================
+    # ACCELERATION
+    # ========================================================
 
-    if smart >= 5:
+    if accel >= 4:
         pontos += 5
-    elif smart >= 2:
+    elif accel >= 2:
         pontos += 3
+    elif accel >= 1.3:
+        pontos += 2
+
+    # ========================================================
+    # SMART MONEY
+    # ========================================================
+
+    if smart >= 8:
+        pontos += 7
+    elif smart >= 5:
+        pontos += 5
+    elif smart >= 3:
+        pontos += 4
     elif smart >= 1:
-        pontos += 1
+        pontos += 2
 
-    burn = g.get("burn", 0)
+    # ========================================================
+    # HOLDERS
+    # ========================================================
 
-    if burn:
+    if holders >= 300:
+        pontos += 4
+    elif holders >= 120:
+        pontos += 3
+    elif holders >= 40:
+        pontos += 2
 
-        b = (
-            float(burn) * 100
-            if float(burn) <= 1
-            else float(burn)
-        )
+    # ========================================================
+    # SELL PRESSURE
+    # ========================================================
 
-        if b >= 80:
-            pontos += 3
-        elif b >= 50:
-            pontos += 1
+    if sells >= buys:
+        pontos -= 4
 
-    top10 = g.get("top10", 0)
+    # ========================================================
+    # CLASSIFICATION
+    # ========================================================
 
-    if top10:
+    if pontos >= 28:
+        return "🟢", "VERDE — ELITE", pontos
 
-        t = (
-            float(top10) * 100
-            if float(top10) <= 1
-            else float(top10)
-        )
-
-        if t <= 25:
-            pontos += 2
-        elif t >= 50:
-            pontos -= 3
-
-    if pontos >= 18:
-        return "🟢", "VERDE — ELITE", "Smart money entrando"
-
-    elif pontos >= 12:
-        return "🟡", "AMARELO — BOM", "Momentum saudável"
+    elif pontos >= 18:
+        return "🟡", "AMARELO — BOM", pontos
 
     else:
-        return "🔴", "VERMELHO — RISCO", "Possível manipulação"
+        return "🔴", "VERMELHO — RISCO", pontos
 
 # ============================================================
-# PROCESSAR TOKEN
+# PROCESS TOKEN
 # ============================================================
 
 def processar(pair):
@@ -327,6 +384,13 @@ def processar(pair):
         addr = base.get("address")
 
         if not addr:
+            return
+
+        now = time.time()
+
+        old = seen.get(addr)
+
+        if old and now - old < 900:
             return
 
         liq = pair.get("liquidity", {}).get("usd", 0) or 0
@@ -359,7 +423,7 @@ def processar(pair):
         )
 
         # ====================================================
-        # FILTROS
+        # FILTERS
         # ====================================================
 
         if liq < MIN_LIQ or liq > MAX_LIQ:
@@ -371,10 +435,7 @@ def processar(pair):
         if ratio < MIN_RATIO:
             return
 
-        if sells < MIN_SELLS:
-            return
-
-        if vol5m < MIN_VOL:
+        if vol5m < MIN_VOL5M:
             return
 
         if age < MIN_AGE or age > MAX_AGE:
@@ -387,57 +448,47 @@ def processar(pair):
             return
 
         # ====================================================
-        # ACELERAÇÃO
-        # ====================================================
-
-        vol_accel = 0
-
-        if vol1h > 0:
-            vol_accel = vol5m / max(vol1h / 12, 1)
-
-        whale_mode = (
-            buys >= 12 and
-            ratio >= 2 and
-            vol_accel >= 1.8
-        )
-
-        ultra_early = (
-            age <= 5 and
-            buys >= 8 and
-            m5 >= 2
-        )
-
-        if not whale_mode and not ultra_early:
-            return
-
-        # ====================================================
-        # ANTI BOT
+        # ANTI FAKE VOLUME
         # ====================================================
 
         if sells > 0:
 
             sell_ratio = sells / max(buys, 1)
 
-            if sell_ratio < 0.03:
+            if sell_ratio < 0.02:
                 return
 
-            if sell_ratio > 0.95:
+            if sell_ratio > 1.2:
                 return
 
         # ====================================================
-        # REANÁLISE
+        # ACCELERATION
         # ====================================================
 
-        now = time.time()
+        accel = 0
 
-        old = history.get(addr)
+        if vol1h > 0:
 
-        if old:
+            accel = vol5m / max((vol1h / 12), 1)
 
-            last = old.get("last_alert", 0)
+        whale_mode = (
 
-            if now - last < 900:
-                return
+            buys >= 8 and
+            ratio >= 1.5 and
+            accel >= 1.4
+
+        )
+
+        ultra_early = (
+
+            age <= 5 and
+            buys >= 5 and
+            m5 >= 1.5
+
+        )
+
+        if not whale_mode and not ultra_early:
+            return
 
         # ====================================================
         # GMGN
@@ -450,18 +501,35 @@ def processar(pair):
         if lixo:
             return
 
+        holders = g.get("holders", 0)
+
+        if holders > 0 and holders < MIN_HOLDERS:
+            return
+
         # ====================================================
         # SCORE
         # ====================================================
 
-        emoji, label, desc = sinal({
+        emoji, label, pontos = whale_score({
 
-            "ratio": ratio,
             "buys": buys,
+            "sells": sells,
+            "ratio": ratio,
             "age": age,
-            "h1": h1
+            "m5": m5,
+            "h1": h1,
+            "accel": accel
 
         }, g)
+
+        if pontos < MIN_WHALE_SCORE:
+            return
+
+        # ====================================================
+        # SAVE
+        # ====================================================
+
+        seen[addr] = now
 
         symbol = base.get("symbol", "???")
 
@@ -490,22 +558,22 @@ def processar(pair):
                 stats["red"] += 1
 
         # ====================================================
-        # SAÍDAS
+        # TARGETS
         # ====================================================
 
-        empate = price * 1.03
-        alvo1  = price * 1.25
-        alvo2  = price * 1.60
-        alvo3  = price * 2.50
-        stop   = price * 0.87
+        breakeven = price * 1.03
+        tp1 = price * 1.30
+        tp2 = price * 1.70
+        tp3 = price * 3.00
+        stop = price * 0.86
 
         # ====================================================
-        # FORÇA
+        # FORCE BAR
         # ====================================================
 
-        forca = min(int(ratio * 1.5), 10)
+        strength = min(int(pontos / 3), 10)
 
-        barra = "🟢" * forca + "⚪" * (10 - forca)
+        bar = "🟢" * strength + "⚪" * (10 - strength)
 
         # ====================================================
         # GMGN INFO
@@ -532,13 +600,36 @@ def processar(pair):
         ) if burn else 0
 
         # ====================================================
-        # ALERTA
+        # COMMENT
+        # ====================================================
+
+        comments = []
+
+        if smart >= 5:
+            comments.append("🐋 whales entrando")
+
+        if accel >= 2:
+            comments.append("⚡ volume acelerando")
+
+        if age <= 5:
+            comments.append("🧨 ultra early")
+
+        if holders >= 150:
+            comments.append("👥 holders crescendo")
+
+        if ratio >= 3:
+            comments.append("📈 pressão compradora")
+
+        comment = " | ".join(comments)
+
+        # ====================================================
+        # ALERT
         # ====================================================
 
         msg = (
 
             f"{emoji} *{label}*\n"
-            f"_{desc}_\n\n"
+            f"`Score: {pontos}/40`\n\n"
 
             f"💎 *${symbol}*\n"
             f"`{addr}`\n\n"
@@ -553,7 +644,8 @@ def processar(pair):
             f"⚖️ Ratio: `{ratio:.2f}x`\n\n"
 
             f"📈 5m: `{m5:+.1f}%`\n"
-            f"🚀 1h: `{h1:+.1f}%`\n\n"
+            f"🚀 1h: `{h1:+.1f}%`\n"
+            f"⚡ Aceleração: `{accel:.2f}x`\n\n"
 
             f"⏰ Idade: `{age:.1f} min`\n\n"
 
@@ -562,23 +654,25 @@ def processar(pair):
             f"🏦 Top10: `{top10_pct:.0f}%`\n"
             f"🔒 LP Burn: `{burn_pct:.0f}%`\n\n"
 
-            f"💪 Força:\n{barra}\n\n"
+            f"💪 Força:\n{bar}\n\n"
+
+            f"📝 {comment}\n\n"
 
             f"━━━ 💰 SAÍDAS ━━━\n"
 
-            f"⚖️ Breakeven: `${empate:.10f}`\n"
-            f"🎯 TP1: `${alvo1:.10f}` (+25%)\n"
-            f"🚀 TP2: `${alvo2:.10f}` (+60%)\n"
-            f"🌕 TP3: `${alvo3:.10f}` (+150%)\n"
-            f"🛑 Stop: `${stop:.10f}` (-13%)\n\n"
+            f"⚖️ Breakeven: `${breakeven:.10f}`\n"
+            f"🎯 TP1: `${tp1:.10f}` (+30%)\n"
+            f"🚀 TP2: `${tp2:.10f}` (+70%)\n"
+            f"🌕 TP3: `${tp3:.10f}` (+200%)\n"
+            f"🛑 Stop: `${stop:.10f}` (-14%)\n\n"
 
-            f"🟢 GMGN:\n"
+            f"🟢 GMGN\n"
             f"https://gmgn.ai/sol/token/{addr}\n\n"
 
-            f"📊 DEX:\n"
+            f"📊 DEX\n"
             f"https://dexscreener.com/solana/{addr}\n\n"
 
-            f"⚡ TROJAN:\n"
+            f"⚡ TROJAN\n"
             f"https://t.me/solana_trojan_bot?start=r-user_{addr}"
         )
 
@@ -594,15 +688,15 @@ def processar(pair):
 
 def scan():
 
-    idx = 0
+    idx = random.randint(0, len(ENDPOINTS)-1)
 
     while True:
 
-        url = ENDPOINTS[idx % len(ENDPOINTS)]
-
-        idx += 1
-
         try:
+
+            url = ENDPOINTS[idx % len(ENDPOINTS)]
+
+            idx += 1
 
             r = session.get(
                 url,
@@ -616,20 +710,16 @@ def scan():
 
                 for pair in data:
 
-                    threading.Thread(
-                        target=processar,
-                        args=(pair,),
-                        daemon=True
-                    ).start()
+                    processar(pair)
 
         except Exception as e:
 
             print(f"[SCAN] {e}")
 
-        time.sleep(0.25)
+        time.sleep(0.15)
 
 # ============================================================
-# MONITOR SAÍDA
+# MONITOR
 # ============================================================
 
 def monitor_saida():
@@ -655,7 +745,7 @@ def monitor_saida():
 
             addrs = list(check.keys())
 
-            precos = {}
+            prices = {}
 
             for i in range(0, len(addrs), 30):
 
@@ -680,7 +770,7 @@ def monitor_saida():
 
                         if a and v:
 
-                            precos[a] = {
+                            prices[a] = {
                                 "price": float(v),
                                 "sells": s
                             }
@@ -690,7 +780,7 @@ def monitor_saida():
 
             for addr, info in check.items():
 
-                d = precos.get(addr)
+                d = prices.get(addr)
 
                 if not d:
                     continue
@@ -704,7 +794,7 @@ def monitor_saida():
 
                 msg = None
 
-                if pct <= -13:
+                if pct <= -14:
 
                     msg = (
 
@@ -714,10 +804,10 @@ def monitor_saida():
 
                         f"📉 `{pct:.1f}%`\n\n"
 
-                        f"⚠️ Proteja o capital"
+                        f"⚠️ Capital protegido"
                     )
 
-                elif pct >= 60:
+                elif pct >= 70:
 
                     msg = (
 
@@ -730,7 +820,7 @@ def monitor_saida():
                         f"💰 Realize parcial"
                     )
 
-                elif sells > 40 and pct < -5:
+                elif sells >= 50 and pct < -5:
 
                     msg = (
 
@@ -754,12 +844,12 @@ def monitor_saida():
 
         except Exception as e:
 
-            print(f"[SAIDA] {e}")
+            print(f"[MONITOR] {e}")
 
         time.sleep(120)
 
 # ============================================================
-# RELATÓRIO
+# REPORT
 # ============================================================
 
 def relatorio():
@@ -785,27 +875,29 @@ def relatorio():
 
                 f"📊 *RELATÓRIO 2H*\n\n"
 
-                f"📤 Alertas: `{st['sent']}`\n"
+                f"📤 Alertas: `{st['sent']}`\n\n"
 
-                f"🟢 Verdes: `{st['green']}`\n"
-                f"🟡 Amarelos: `{st['yellow']}`\n"
-                f"🔴 Vermelhos: `{st['red']}`\n\n"
+                f"🟢 Elite: `{st['green']}`\n"
+                f"🟡 Bons: `{st['yellow']}`\n"
+                f"🔴 Risco: `{st['red']}`\n\n"
 
-                f"🧠 Scanner ativo 24h\n"
-                f"🐋 Whale detection online\n"
-                f"⚡ Ultra early monitor ativo"
+                f"🐋 Whale monitor ativo\n"
+                f"⚡ Ultra early sniper ativo\n"
+                f"🧠 GMGN smart money online\n"
+                f"📈 Entrada antes do varejo\n"
+                f"🛡️ Anti rug ativo"
             )
 
             send(txt)
 
         except Exception as e:
 
-            print(f"[RELATORIO] {e}")
+            print(f"[REPORT] {e}")
 
         time.sleep(REPORT_INTERVAL)
 
 # ============================================================
-# LIMPEZA
+# CLEANER
 # ============================================================
 
 def limpeza():
@@ -830,6 +922,16 @@ def limpeza():
                 for r in remover:
                     del history[r]
 
+            remover_seen = []
+
+            for k, v in seen.items():
+
+                if now - v > 14400:
+                    remover_seen.append(k)
+
+            for r in remover_seen:
+                del seen[r]
+
         except:
             pass
 
@@ -844,7 +946,7 @@ def limpeza():
 def health():
 
     return (
-        f"WHALE QUANT ONLINE | "
+        f"WHALE HUNTER ONLINE | "
         f"tokens={len(history)} | "
         f"fila={tg_queue.qsize()} | "
         f"🟢{stats['green']} "
@@ -860,7 +962,7 @@ if __name__ == "__main__":
 
     send(
 
-        "🟢 *WHALE QUANT — ONLINE*\n\n"
+        "🟢 *WHALE HUNTER — ONLINE*\n\n"
 
         "🐋 Monitorando baleias 24h\n"
         "⚡ Ultra early sniper ativo\n"
@@ -893,17 +995,17 @@ if __name__ == "__main__":
     ).start()
 
     # ========================================================
-    # 12 THREADS
+    # 20 SCANNERS PARA FICAR 24H
     # ========================================================
 
-    for i in range(12):
+    for i in range(20):
 
         threading.Thread(
             target=scan,
             daemon=True
         ).start()
 
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     app.run(
         host="0.0.0.0",

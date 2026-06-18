@@ -1,25 +1,40 @@
 # ============================================================
-# WHALE HUNTER v9.0 - MODO AGGRESSIVO (para testes)
+# WHALE HUNTER v10.0 - TRADING AUTOMATIZADO
 # ============================================================
-# Filtros muito mais leves para gerar alertas imediatamente
+# - Monitora DexScreener + GMGN em tempo real
+# - Compra automaticamente tokens promissores
+# - Vende automaticamente nos alvos (1.8x, 3.5x, 7x)
+# - Stop-loss automático (-15%)
+# - Alerta de saída por Telegram
 # ============================================================
 
 import os
 import time
 import threading
 import requests
+import json
 import telebot
 from flask import Flask
 from queue import Queue, Empty
+from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import base64
+import hashlib
+import hmac
 
 # ============================================================
-# TELEGRAM
+# CONFIGURAÇÕES DO TELEGRAM
 # ============================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID        = os.getenv("CHAT_ID")
+CHAT_ID = os.getenv("CHAT_ID")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
+
+# ============================================================
+# CONFIGURAÇÕES DA GMGN
+# ============================================================
+GMGN_API_KEY = os.getenv("GMGN_API_KEY")
+GMGN_PRIVATE_KEY = os.getenv("GMGN_PRIVATE_KEY")
 
 # ============================================================
 # FLASK
@@ -39,27 +54,33 @@ session.mount("http://", adapter)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ============================================================
-# CONFIGURAÇÕES - MODO AGGRESSIVO (para gerar alertas)
+# CONFIGURAÇÕES DE TRADING
 # ============================================================
 SCAN_DELAY = 0.5
-REPORT_INTERVAL = 7200
+REPORT_INTERVAL = 7200  # 2 horas
 
-# Filtros MUITO mais leves
-MIN_LIQ = 2000              # reduzido de 4000
-MAX_LIQ = 200000            # aumentado
-MIN_BUYS = 3                # reduzido de 6 - qualquer token com 3 compras
-MAX_BUYS = 1000
-MIN_RATIO = 1.2             # reduzido de 2.0 - apenas um pouco mais buys que sells
-MIN_VOL5M = 300             # reduzido de 600
-MIN_AGE = 0.1
-MAX_AGE = 120               # aumentado para 2 horas
-MIN_M5 = 0.5                # qualquer alta positiva
-MAX_M5 = 500
-MAX_TOP10 = 50              # mais tolerante
-MIN_SMART = 0               # ZERO - não exige smart money
-MIN_WHALE_AVG_SIZE = 100    # reduzido drasticamente
-MIN_HOLDER_GROWTH_PCT = 0   # zero
-ENABLE_HOLDER_REQUIREMENT = False
+# Filtros de entrada
+MIN_LIQ = 4000
+MAX_LIQ = 200000
+MIN_BUYS = 5
+MAX_BUYS = 500
+MIN_RATIO = 1.8
+MIN_VOL5M = 500
+MIN_AGE = 0.3
+MAX_AGE = 60
+MIN_M5 = 1.5
+MAX_M5 = 150
+MAX_TOP10 = 35
+MIN_SMART = 1
+MIN_WHALE_AVG_SIZE = 200
+
+# Configurações de trade
+TRADE_AMOUNT_SOL = 0.1  # Quantidade em SOL por trade
+SLIPPAGE = 15  # Slippage em %
+TP1 = 1.8  # Primeiro take-profit (1.8x)
+TP2 = 3.5  # Segundo take-profit (3.5x)
+TP3 = 7.0  # Terceiro take-profit (7x)
+STOP_LOSS = 0.85  # Stop-loss (85% do preço = -15%)
 
 # ============================================================
 # ENDPOINTS
@@ -75,12 +96,13 @@ ENDPOINTS = [
 # ESTADO GLOBAL
 # ============================================================
 lock = threading.Lock()
-history = {}
-stats = {"sent": 0, "green": 0, "yellow": 0}
+history = {}  # tokens já processados
+positions = {}  # posições ativas {addr: {symbol, entry_price, amount, tp1, tp2, tp3, stop_loss}}
+stats = {"sent": 0, "green": 0, "yellow": 0, "trades": 0}
 tg_queue = Queue()
 
 # ============================================================
-# TELEGRAM
+# FUNÇÕES TELEGRAM
 # ============================================================
 def tg_worker():
     while True:
@@ -104,50 +126,146 @@ def send(msg):
         pass
 
 # ============================================================
-# API GMGN simplificada
+# GMGN API (Autenticada)
 # ============================================================
-def get_gmgn(addr):
+def gmgn_api_request(endpoint, method="GET", data=None):
+    """Faz requisição autenticada para a API da GMGN"""
     try:
-        r = session.get(f"https://gmgn.ai/api/v1/token/sol/{addr}",
-                        headers={"User-Agent": "Mozilla/5.0",
-                                 "Referer": "https://gmgn.ai/"},
-                        timeout=5)
-        if r.status_code != 200:
-            return None
-        d = r.json().get("data", {}) or {}
-        return {
-            "smart": d.get("smart_degen_count", 0) or 0,
-            "holders": d.get("holder_count", 0) or 0,
-            "top10": d.get("top10_holder_rate", 0) or 0,
-            "burn": d.get("burn_ratio", 0) or 0,
-            "rug": d.get("rug_ratio", 0) or 0,
-            "tax": d.get("sell_tax", 0) or 0,
-            "honeypot": d.get("is_honeypot", False),
-            "dev": d.get("creator_hold_percent", 0) or 0,
+        url = f"https://api.gmgn.ai{endpoint}"
+        timestamp = str(int(time.time() * 1000))
+        
+        headers = {
+            "X-APIKEY": GMGN_API_KEY,
+            "X-TIMESTAMP": timestamp,
+            "Content-Type": "application/json"
         }
+        
+        # Assinatura da requisição (se necessário)
+        if method == "POST":
+            payload = json.dumps(data) if data else ""
+            signature = hmac.new(
+                GMGN_PRIVATE_KEY.encode(),
+                f"{timestamp}{payload}".encode(),
+                hashlib.sha256
+            ).hexdigest()
+            headers["X-SIGNATURE"] = signature
+        
+        if method == "GET":
+            response = session.get(url, headers=headers, timeout=10)
+        else:
+            response = session.post(url, headers=headers, json=data, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"[GMGN] Erro {response.status_code}: {response.text}")
+            return None
+            
     except Exception as e:
-        print(f"[GMGN] Erro: {e}")
+        print(f"[GMGN] Exceção: {e}")
         return None
 
+def get_token_info(addr):
+    """Obtém informações detalhadas do token na GMGN"""
+    endpoint = f"/v1/token/sol/{addr}"
+    return gmgn_api_request(endpoint)
+
+def execute_swap(token_address, amount_sol, slippage=15):
+    """Executa uma swap (compra/venda) via GMGN"""
+    endpoint = "/v1/swap"
+    data = {
+        "fromToken": "So11111111111111111111111111111111111111112",  # SOL
+        "toToken": token_address,
+        "amount": str(amount_sol),
+        "slippage": slippage,
+        "chain": "solana"
+    }
+    return gmgn_api_request(endpoint, "POST", data)
+
+def execute_sell(token_address, amount, slippage=15):
+    """Vende um token via GMGN"""
+    endpoint = "/v1/swap"
+    data = {
+        "fromToken": token_address,
+        "toToken": "So11111111111111111111111111111111111111112",  # SOL
+        "amount": str(amount),
+        "slippage": slippage,
+        "chain": "solana"
+    }
+    return gmgn_api_request(endpoint, "POST", data)
+
 # ============================================================
-# ANTI RUG básico
+# ANTI RUG
 # ============================================================
 def is_lixo(g):
     if not g:
         return False, ""
     if g.get("honeypot") is True:
         return True, "HONEYPOT"
-    if g.get("tax", 0) > 30:
+    if g.get("tax", 0) > 25:
         return True, f"TAX {g['tax']}%"
-    if g.get("rug", 0) > 0.9:
+    if g.get("rug", 0) > 0.8:
         return True, "RUG"
     dev = g.get("dev", 0)
-    if dev and float(dev) > 20:
+    if dev and float(dev) > 15:
         return True, f"DEV {dev:.0f}%"
+    top10 = g.get("top10", 0)
+    if top10:
+        t = float(top10) * 100 if float(top10) <= 1 else float(top10)
+        if t > MAX_TOP10:
+            return True, f"TOP10 {t:.0f}%"
     return False, ""
 
 # ============================================================
-# PROCESSAMENTO PRINCIPAL (versão simplificada)
+# SCORE
+# ============================================================
+def calculate_score(data, g, avg_buy_size):
+    pontos = 0
+    ratio = data["ratio"]
+    buys = data["buys"]
+    age = data["age"]
+    m5 = data["m5"]
+    accel = data["accel"]
+
+    # Baleias
+    if avg_buy_size >= 800: pontos += 6
+    elif avg_buy_size >= 400: pontos += 4
+    elif avg_buy_size >= 200: pontos += 2
+
+    # Ratio
+    if ratio >= 4: pontos += 5
+    elif ratio >= 2.5: pontos += 4
+    elif ratio >= 1.8: pontos += 2
+
+    # Idade
+    if age <= 5: pontos += 5
+    elif age <= 15: pontos += 3
+    elif age <= 30: pontos += 1
+
+    # Momentum
+    if m5 >= 20: pontos += 4
+    elif m5 >= 8: pontos += 2
+
+    # Aceleração
+    if accel >= 2.5: pontos += 4
+    elif accel >= 1.5: pontos += 2
+
+    # Smart money
+    smart = g.get("smart", 0) if g else 0
+    if smart >= 4: pontos += 7
+    elif smart >= 2: pontos += 4
+    elif smart >= 1: pontos += 2
+
+    # Holders
+    holders = g.get("holders", 0) if g else 0
+    if holders >= 200: pontos += 4
+    elif holders >= 80: pontos += 2
+    elif holders >= 30: pontos += 1
+
+    return pontos
+
+# ============================================================
+# PROCESSAMENTO PRINCIPAL (COM EXECUÇÃO DE TRADES)
 # ============================================================
 def processar(pair):
     try:
@@ -194,61 +312,221 @@ def processar(pair):
         if age < MIN_AGE or age > MAX_AGE:
             return
 
-        # Evita repetição (30 minutos de cooldown)
+        accel = vol5m / max(vol.get("h1", 0) / 12, 1) if vol.get("h1", 0) > 0 else 0
+
+        # Verifica se já está em posição ou já processado
         with lock:
-            old = history.get(addr)
-            if old and time.time() - old["ts"] < 1800:
+            if addr in positions or addr in history:
                 return
 
-        # Tenta pegar dados GMGN (não obrigatório)
-        g = get_gmgn(addr)
+        # Consulta GMGN
+        g = get_token_info(addr)
+        if not g:
+            return
+            
         lixo, motivo = is_lixo(g)
         if lixo:
+            return
+
+        # Smart money mínimo
+        if g.get("smart", 0) < MIN_SMART:
+            return
+
+        avg_buy_size = vol5m / max(buys, 1)
+        if avg_buy_size < MIN_WHALE_AVG_SIZE:
+            return
+
+        # Calcula score
+        score = calculate_score({
+            "ratio": ratio, "buys": buys, "age": age,
+            "m5": m5, "accel": accel
+        }, g, avg_buy_size)
+
+        # Só compra se score >= 20 (ELITE ou WHALE)
+        if score < 20:
             return
 
         symbol = base.get("symbol", "???")
         now_ts = time.time()
 
+        # ============================================================
+        # EXECUTA COMPRA AUTOMÁTICA
+        # ============================================================
+        try:
+            send(f"🟢 *EXECUTANDO COMPRA*\n\n"
+                 f"Token: *${symbol}*\n"
+                 f"Score: `{score}`\n"
+                 f"Valor: `{TRADE_AMOUNT_SOL} SOL`\n"
+                 f"Preço: `${price_val:.10f}`\n\n"
+                 f"⏳ Processando...")
+            
+            # Executa a compra
+            trade_result = execute_swap(addr, TRADE_AMOUNT_SOL, SLIPPAGE)
+            
+            if trade_result and trade_result.get("success"):
+                # Registra a posição
+                with lock:
+                    positions[addr] = {
+                        "symbol": symbol,
+                        "entry_price": price_val,
+                        "amount": TRADE_AMOUNT_SOL,
+                        "tp1": price_val * TP1,
+                        "tp2": price_val * TP2,
+                        "tp3": price_val * TP3,
+                        "stop_loss": price_val * STOP_LOSS,
+                        "entry_time": now_ts,
+                        "tx": trade_result.get("txid", "N/A")
+                    }
+                    stats["trades"] += 1
+                    stats["sent"] += 1
+                    stats["green"] += 1 if score >= 28 else 0
+                    stats["yellow"] += 1 if 20 <= score < 28 else 0
+                
+                send(f"✅ *COMPRA REALIZADA COM SUCESSO!*\n\n"
+                     f"💎 *${symbol}*\n"
+                     f"`{addr}`\n\n"
+                     f"💲 Entrada: `${price_val:.10f}`\n"
+                     f"📊 Montante: `{TRADE_AMOUNT_SOL} SOL`\n"
+                     f"🔗 Tx: `{trade_result.get('txid', 'N/A')[:16]}...`\n\n"
+                     f"🎯 TP1: `{TP1}x` (${price_val * TP1:.8f})\n"
+                     f"🚀 TP2: `{TP2}x` (${price_val * TP2:.8f})\n"
+                     f"🌕 TP3: `{TP3}x` (${price_val * TP3:.8f})\n"
+                     f"🛑 STOP: `-{int((1-STOP_LOSS)*100)}%` (${price_val * STOP_LOSS:.8f})")
+            else:
+                send(f"❌ *FALHA NA COMPRA*\n\n"
+                     f"Token: *${symbol}*\n"
+                     f"Erro: {trade_result}")
+                     
+        except Exception as e:
+            send(f"❌ *ERRO NA COMPRA*\n\n"
+                 f"Token: *${symbol}*\n"
+                 f"Erro: {str(e)}")
+            print(f"[TRADE] Erro ao comprar {symbol}: {e}")
+            
+        # Salva no histórico para evitar repetições
         with lock:
-            history[addr] = {"symbol": symbol, "price": price_val, "ts": now_ts}
-            stats["sent"] += 1
-
-        # Prepara mensagem
-        avg_buy = vol5m / max(buys, 1)
-        holders = g.get("holders", 0) if g else 0
-        smart = g.get("smart", 0) if g else 0
-        
-        # Emoji baseado na qualidade (para orientação)
-        quality = "🟢" if (buys >= 20 and ratio >= 2 and smart >= 2) else "🟡" if (buys >= 10 and ratio >= 1.5) else "🔵"
-        quality_label = "ELITE" if quality == "🟢" else "WHALE" if quality == "🟡" else "EARLY"
-
-        msg = (
-            f"{quality} *{quality_label} DETECTED* {quality}\n\n"
-            f"💎 *${symbol}*\n"
-            f"`{addr[:8]}...{addr[-8:]}`\n\n"
-            f"💲 Preço: `${price_val:.10f}`\n"
-            f"💧 Liquidez: `${liq:,.0f}`\n"
-            f"📊 Volume 5m: `${vol5m:,.0f}`\n"
-            f"🐋 Ticket médio: `${avg_buy:.0f}`\n\n"
-            f"🔥 Buys: `{buys}` | 📉 Sells: `{sells}`\n"
-            f"⚖️ Ratio: `{ratio:.2f}x`\n"
-            f"📈 5m: `{m5:+.1f}%`\n"
-            f"⏰ Age: `{age:.1f} min`\n\n"
-            f"🧠 Smart: `{smart}` | 👥 Holders: `{holders}`\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🎯 SUGESTÃO:\n"
-            f"{'✅ FORTE - Considere entrar' if quality == '🟢' else '⚠️ MÉDIO - Analise antes' if quality == '🟡' else '🔍 INÍCIO - Monitore'}\n"
-            f"━━━━━━━━━━━━━━━\n\n"
-            f"🟢 GMGN: https://gmgn.ai/sol/token/{addr}\n"
-            f"📊 DEX: https://dexscreener.com/solana/{addr}"
-        )
-        send(msg)
-        
-        # Log no console para debug
-        print(f"[ALERTA] {symbol} - buys:{buys} ratio:{ratio:.1f} vol:{vol5m:.0f}")
+            history[addr] = {"symbol": symbol, "ts": now_ts}
 
     except Exception as e:
         print(f"[PROCESS] {e}")
+
+# ============================================================
+# MONITORAMENTO DE POSIÇÕES (SAÍDA AUTOMÁTICA)
+# ============================================================
+def monitorar_posicoes():
+    """Monitora posições ativas e executa vendas nos alvos"""
+    while True:
+        try:
+            with lock:
+                if not positions:
+                    time.sleep(5)
+                    continue
+                    
+                for addr, pos in list(positions.items()):
+                    # Consulta preço atual
+                    pair_data = session.get(
+                        f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                        headers=HEADERS,
+                        timeout=5
+                    )
+                    
+                    if pair_data.status_code != 200:
+                        continue
+                        
+                    data = pair_data.json()
+                    if not data.get("pairs"):
+                        continue
+                        
+                    current_price = float(data["pairs"][0]["priceUsd"])
+                    symbol = pos["symbol"]
+                    
+                    # Verifica stop-loss
+                    if current_price <= pos["stop_loss"]:
+                        # Executa venda (stop-loss)
+                        send(f"🔻 *STOP-LOSS ATIVADO*\n\n"
+                             f"Token: *${symbol}*\n"
+                             f"Preço entrada: `${pos['entry_price']:.8f}`\n"
+                             f"Preço atual: `${current_price:.8f}`\n"
+                             f"Perda: `-{int((1 - current_price/pos['entry_price']) * 100)}%`\n\n"
+                             f"⏳ Executando venda...")
+                        
+                        sell_result = execute_sell(addr, pos["amount"], SLIPPAGE)
+                        if sell_result and sell_result.get("success"):
+                            send(f"✅ *VENDA EXECUTADA (STOP-LOSS)*\n\n"
+                                 f"Token: *${symbol}*\n"
+                                 f"Preço: `${current_price:.8f}`\n"
+                                 f"Tx: `{sell_result.get('txid', 'N/A')[:16]}...`")
+                        else:
+                            send(f"❌ *FALHA NA VENDA (STOP-LOSS)*\n\n"
+                                 f"Token: *${symbol}*\n"
+                                 f"Erro: {sell_result}")
+                        
+                        del positions[addr]
+                        continue
+                    
+                    # Verifica take-profits
+                    if current_price >= pos["tp3"]:
+                        # Vende 50% no TP3
+                        sell_amount = pos["amount"] * 0.5
+                        send(f"🚀 *TP3 ATINGIDO! (7x)*\n\n"
+                             f"Token: *${symbol}*\n"
+                             f"Preço: `${current_price:.8f}`\n"
+                             f"Lucro: `+{int((current_price/pos['entry_price'] - 1) * 100)}%`\n\n"
+                             f"⏳ Vendendo 50%...")
+                        
+                        sell_result = execute_sell(addr, sell_amount, SLIPPAGE)
+                        if sell_result and sell_result.get("success"):
+                            send(f"✅ *VENDA PARCIAL (TP3)*\n\n"
+                                 f"Token: *${symbol}*\n"
+                                 f"Preço: `${current_price:.8f}`\n"
+                                 f"Tx: `{sell_result.get('txid', 'N/A')[:16]}...`\n"
+                                 f"Restante: moonbag para TP4+")
+                            # Atualiza posição
+                            pos["amount"] -= sell_amount
+                            if pos["amount"] <= 0:
+                                del positions[addr]
+                        continue
+                    
+                    if current_price >= pos["tp2"]:
+                        # Vende 30% no TP2
+                        sell_amount = pos["amount"] * 0.3
+                        send(f"🚀 *TP2 ATINGIDO! (3.5x)*\n\n"
+                             f"Token: *${symbol}*\n"
+                             f"Preço: `${current_price:.8f}`\n"
+                             f"Lucro: `+{int((current_price/pos['entry_price'] - 1) * 100)}%`\n\n"
+                             f"⏳ Vendendo 30%...")
+                        
+                        sell_result = execute_sell(addr, sell_amount, SLIPPAGE)
+                        if sell_result and sell_result.get("success"):
+                            send(f"✅ *VENDA PARCIAL (TP2)*\n\n"
+                                 f"Token: *${symbol}*\n"
+                                 f"Preço: `${current_price:.8f}`\n"
+                                 f"Tx: `{sell_result.get('txid', 'N/A')[:16]}...`")
+                            pos["amount"] -= sell_amount
+                        continue
+                    
+                    if current_price >= pos["tp1"]:
+                        # Vende 20% no TP1
+                        sell_amount = pos["amount"] * 0.2
+                        send(f"📈 *TP1 ATINGIDO! (1.8x)*\n\n"
+                             f"Token: *${symbol}*\n"
+                             f"Preço: `${current_price:.8f}`\n"
+                             f"Lucro: `+{int((current_price/pos['entry_price'] - 1) * 100)}%`\n\n"
+                             f"⏳ Vendendo 20%...")
+                        
+                        sell_result = execute_sell(addr, sell_amount, SLIPPAGE)
+                        if sell_result and sell_result.get("success"):
+                            send(f"✅ *VENDA PARCIAL (TP1)*\n\n"
+                                 f"Token: *${symbol}*\n"
+                                 f"Preço: `${current_price:.8f}`\n"
+                                 f"Tx: `{sell_result.get('txid', 'N/A')[:16]}...`")
+                            pos["amount"] -= sell_amount
+                        continue
+                        
+        except Exception as e:
+            print(f"[MONITOR] Erro: {e}")
+            
+        time.sleep(10)  # Verifica a cada 10 segundos
 
 # ============================================================
 # SCANNER
@@ -259,15 +537,11 @@ def scan():
         try:
             url = ENDPOINTS[idx % len(ENDPOINTS)]
             idx += 1
-            print(f"[SCAN] Buscando: {url}")
             r = session.get(url, headers=HEADERS, timeout=10)
             if r.status_code == 200:
                 pairs = r.json().get("pairs") or []
-                print(f"[SCAN] Encontrou {len(pairs)} pares")
                 for pair in pairs:
                     processar(pair)
-            else:
-                print(f"[SCAN] HTTP {r.status_code}")
         except Exception as e:
             print(f"[SCAN] Erro: {e}")
         time.sleep(SCAN_DELAY)
@@ -281,13 +555,19 @@ def relatorio():
         try:
             with lock:
                 st = dict(stats)
+                pos_count = len(positions)
             txt = (
                 f"📊 *RELATÓRIO 2H*\n\n"
-                f"📤 Alertas enviados: `{st['sent']}`\n"
-                f"🟢 Elite: `{st['green']}`\n"
-                f"🟡 Whale: `{st['yellow']}`\n\n"
-                f"Bot rodando em modo AGGRESSIVO\n"
-                f"Filtros leves para detectar qualquer movimento"
+                f"📤 Alertas: `{st['sent']}`\n"
+                f"🟢 Elite: `{st['green']}`  |  🟡 Whale: `{st['yellow']}`\n"
+                f"💰 Trades executados: `{st['trades']}`\n"
+                f"📈 Posições ativas: `{pos_count}`\n\n"
+                f"🐋 Whale monitor ativo\n"
+                f"🧠 Smart money scanner\n"
+                f"⚡ Stealth buy detector\n"
+                f"🚀 Ultra early monitor\n"
+                f"🛡️ Anti rug system\n"
+                f"💰 Trading automatizado ativo"
             )
             send(txt)
         except Exception as e:
@@ -299,36 +579,45 @@ def relatorio():
 # ============================================================
 @app.route("/")
 def health():
-    return f"WHALE HUNTER v9.0 | alertas={stats['sent']} | tokens={len(history)}"
+    with lock:
+        pos_count = len(positions)
+    return f"WHALE HUNTER v10.0 | alertas={stats['sent']} | trades={stats['trades']} | posicoes={pos_count}"
+
+@app.route("/positions")
+def get_positions():
+    with lock:
+        return dict(positions)
 
 @app.route("/stats")
 def get_stats():
-    return {
-        "alertas_enviados": stats["sent"],
-        "tokens_unicos": len(history),
-        "fila_tg": tg_queue.qsize()
-    }
+    return dict(stats)
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v9.0 (MODO AGGRESSIVO) ===")
+    print("=== INICIANDO WHALE HUNTER v10.0 (AUTOMATIZADO) ===")
     
-    send("🟢 *WHALE HUNTER v9.0 ONLINE - MODO AGGRESSIVO*\n\n"
-         "⚡ Filtros reduzidos para DETECTAR TUDO\n"
-         "📊 Agora vamos ver o que aparece\n"
-         "🔍 Ajuste os filtros depois se quiser menos alerts\n\n"
-         f"✅ MIN_BUYS={MIN_BUYS} | MIN_RATIO={MIN_RATIO} | MIN_VOL5M={MIN_VOL5M}\n"
-         f"✅ Smart Money = {MIN_SMART} (não obrigatório)")
+    send("🟢 *WHALE HUNTER v10.0 ONLINE*\n\n"
+         "🤖 *MODO AUTOMATIZADO ATIVO*\n"
+         "💰 Compras e vendas automáticas\n"
+         "🎯 TP1: 1.8x | TP2: 3.5x | TP3: 7x\n"
+         "🛑 Stop-loss: -15%\n\n"
+         f"📊 Trade amount: `{TRADE_AMOUNT_SOL} SOL`\n"
+         f"🔍 Filtros ativos: SMART>={MIN_SMART}, BUYS>={MIN_BUYS}, RATIO>={MIN_RATIO}\n\n"
+         "⚠️ *Monitore os logs para verificar execuções*")
 
+    # Inicia threads
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()
-
-    # 5 threads apenas para começar
+    threading.Thread(target=monitorar_posicoes, daemon=True).start()
+    
+    # Threads de scan
     for _ in range(5):
         threading.Thread(target=scan, daemon=True).start()
         time.sleep(0.2)
 
-    print(f"=== BOT RODANDO na porta {int(os.environ.get('PORT', 10000))} ===")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    # Inicia Flask
+    port = int(os.environ.get("PORT", 10000))
+    print(f"=== BOT RODANDO na porta {port} ===")
+    app.run(host="0.0.0.0", port=port)

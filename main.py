@@ -1,11 +1,11 @@
 # ============================================================
-# WHALE HUNTER v10.0 - TRADING AUTOMATIZADO
+# WHALE HUNTER v12.0 - COPY TRADING DINÂMICO
 # ============================================================
-# - Monitora DexScreener + GMGN em tempo real
-# - Compra automaticamente tokens promissores
-# - Vende automaticamente nos alvos (1.8x, 3.5x, 7x)
-# - Stop-loss automático (-15%)
-# - Alerta de saída por Telegram
+# - Encontra automaticamente os TOP 5 TRADERS do momento
+# - Atualiza a lista a cada 10 minutos
+# - Copia as compras dos traders identificados
+# - Entrada com 0.01 SOL por trade
+# - Saída automática quando eles vendem
 # ============================================================
 
 import os
@@ -16,23 +16,19 @@ import json
 import telebot
 from flask import Flask
 from queue import Queue, Empty
-from datetime import datetime
+from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import base64
-import hashlib
 import hmac
+import hashlib
 
 # ============================================================
-# CONFIGURAÇÕES DO TELEGRAM
+# CONFIGURAÇÕES
 # ============================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
-# ============================================================
-# CONFIGURAÇÕES DA GMGN
-# ============================================================
 GMGN_API_KEY = os.getenv("GMGN_API_KEY")
 GMGN_PRIVATE_KEY = os.getenv("GMGN_PRIVATE_KEY")
 
@@ -47,7 +43,7 @@ app = Flask(__name__)
 session = requests.Session()
 retries = Retry(total=3, backoff_factor=0.4,
                 status_forcelist=[429, 500, 502, 503, 504])
-adapter = HTTPAdapter(pool_connections=150, pool_maxsize=150, max_retries=retries)
+adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=retries)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
 
@@ -56,50 +52,32 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 # ============================================================
 # CONFIGURAÇÕES DE TRADING
 # ============================================================
-SCAN_DELAY = 0.5
+SCAN_DELAY = 3  # Verificar a cada 3 segundos
 REPORT_INTERVAL = 7200  # 2 horas
-
-# Filtros de entrada
-MIN_LIQ = 4000
-MAX_LIQ = 200000
-MIN_BUYS = 5
-MAX_BUYS = 500
-MIN_RATIO = 1.8
-MIN_VOL5M = 500
-MIN_AGE = 0.3
-MAX_AGE = 60
-MIN_M5 = 1.5
-MAX_M5 = 150
-MAX_TOP10 = 35
-MIN_SMART = 1
-MIN_WHALE_AVG_SIZE = 200
+TOP_TRADERS_UPDATE_INTERVAL = 600  # Atualizar top traders a cada 10 minutos
+TOP_TRADERS_COUNT = 5  # Manter os 5 melhores
 
 # Configurações de trade
-TRADE_AMOUNT_SOL = 0.1  # Quantidade em SOL por trade
-SLIPPAGE = 15  # Slippage em %
-TP1 = 1.8  # Primeiro take-profit (1.8x)
-TP2 = 3.5  # Segundo take-profit (3.5x)
-TP3 = 7.0  # Terceiro take-profit (7x)
-STOP_LOSS = 0.85  # Stop-loss (85% do preço = -15%)
+TRADE_AMOUNT_SOL = 0.01  # 0.01 SOL por trade
+SLIPPAGE = 15
 
-# ============================================================
-# ENDPOINTS
-# ============================================================
-ENDPOINTS = [
-    "https://api.dexscreener.com/latest/dex/search?q=solana",
-    "https://api.dexscreener.com/latest/dex/search?q=pumpfun",
-    "https://api.dexscreener.com/latest/dex/search?q=raydium",
-    "https://api.dexscreener.com/latest/dex/search?q=solana+meme",
-]
+# Filtros anti-rug
+MIN_LIQ = 3000
+MAX_TOP10 = 40
+MAX_DEV_HOLD = 20
+MAX_TAX = 25
 
 # ============================================================
 # ESTADO GLOBAL
 # ============================================================
 lock = threading.Lock()
-history = {}  # tokens já processados
-positions = {}  # posições ativas {addr: {symbol, entry_price, amount, tp1, tp2, tp3, stop_loss}}
-stats = {"sent": 0, "green": 0, "yellow": 0, "trades": 0}
+top_traders = []  # Lista atualizada dos melhores traders
+trader_positions = {}  # Posições ativas
+executed_trades = {}  # Trades já executados
+trader_cache = {}  # Cache de traders para não repetir consultas
+stats = {"trades": 0, "profits": 0, "losses": 0}
 tg_queue = Queue()
+last_update = 0
 
 # ============================================================
 # FUNÇÕES TELEGRAM
@@ -140,7 +118,6 @@ def gmgn_api_request(endpoint, method="GET", data=None):
             "Content-Type": "application/json"
         }
         
-        # Assinatura da requisição (se necessário)
         if method == "POST":
             payload = json.dumps(data) if data else ""
             signature = hmac.new(
@@ -149,32 +126,44 @@ def gmgn_api_request(endpoint, method="GET", data=None):
                 hashlib.sha256
             ).hexdigest()
             headers["X-SIGNATURE"] = signature
-        
-        if method == "GET":
-            response = session.get(url, headers=headers, timeout=10)
-        else:
             response = session.post(url, headers=headers, json=data, timeout=10)
+        else:
+            response = session.get(url, headers=headers, timeout=10)
         
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"[GMGN] Erro {response.status_code}: {response.text}")
             return None
             
     except Exception as e:
         print(f"[GMGN] Exceção: {e}")
         return None
 
+def get_trending_tokens():
+    """Obtém tokens em alta no momento"""
+    endpoint = "/v1/rank/sol/trending"
+    return gmgn_api_request(endpoint)
+
+def get_token_top_traders(token_addr):
+    """Obtém os melhores traders de um token específico"""
+    endpoint = f"/v1/token/sol/{token_addr}/top_traders"
+    return gmgn_api_request(endpoint)
+
+def get_trader_activity(wallet_addr):
+    """Obtém atividades recentes de uma wallet"""
+    endpoint = f"/v1/wallet/sol/{wallet_addr}/activities"
+    return gmgn_api_request(endpoint)
+
 def get_token_info(addr):
-    """Obtém informações detalhadas do token na GMGN"""
+    """Obtém informações detalhadas do token"""
     endpoint = f"/v1/token/sol/{addr}"
     return gmgn_api_request(endpoint)
 
 def execute_swap(token_address, amount_sol, slippage=15):
-    """Executa uma swap (compra/venda) via GMGN"""
+    """Executa swap via GMGN"""
     endpoint = "/v1/swap"
     data = {
-        "fromToken": "So11111111111111111111111111111111111111112",  # SOL
+        "fromToken": "So11111111111111111111111111111111111111112",
         "toToken": token_address,
         "amount": str(amount_sol),
         "slippage": slippage,
@@ -182,369 +171,251 @@ def execute_swap(token_address, amount_sol, slippage=15):
     }
     return gmgn_api_request(endpoint, "POST", data)
 
-def execute_sell(token_address, amount, slippage=15):
-    """Vende um token via GMGN"""
-    endpoint = "/v1/swap"
-    data = {
-        "fromToken": token_address,
-        "toToken": "So11111111111111111111111111111111111111112",  # SOL
-        "amount": str(amount),
-        "slippage": slippage,
-        "chain": "solana"
-    }
-    return gmgn_api_request(endpoint, "POST", data)
-
 # ============================================================
-# ANTI RUG
+# ANÁLISE RÁPIDA DO TOKEN
 # ============================================================
-def is_lixo(g):
-    if not g:
-        return False, ""
-    if g.get("honeypot") is True:
-        return True, "HONEYPOT"
-    if g.get("tax", 0) > 25:
-        return True, f"TAX {g['tax']}%"
-    if g.get("rug", 0) > 0.8:
-        return True, "RUG"
-    dev = g.get("dev", 0)
-    if dev and float(dev) > 15:
-        return True, f"DEV {dev:.0f}%"
-    top10 = g.get("top10", 0)
+def quick_token_analysis(token_info):
+    """Análise rápida para verificar se o token é lixo"""
+    if not token_info:
+        return False, "Dados não disponíveis"
+    
+    data = token_info.get("data", {})
+    
+    if data.get("is_honeypot", False):
+        return False, "HONEYPOT"
+    
+    tax = data.get("sell_tax", 0)
+    if tax > MAX_TAX:
+        return False, f"TAXA {tax}%"
+    
+    top10 = data.get("top10_holder_rate", 0)
     if top10:
-        t = float(top10) * 100 if float(top10) <= 1 else float(top10)
-        if t > MAX_TOP10:
-            return True, f"TOP10 {t:.0f}%"
-    return False, ""
+        pct = float(top10) * 100 if float(top10) <= 1 else float(top10)
+        if pct > MAX_TOP10:
+            return False, f"TOP10 {pct:.0f}%"
+    
+    dev = data.get("creator_hold_percent", 0)
+    if dev and float(dev) > MAX_DEV_HOLD:
+        return False, f"DEV {dev:.0f}%"
+    
+    if data.get("rug_ratio", 0) > 0.7:
+        return False, "RUG"
+    
+    liq = data.get("liquidity_usd", 0)
+    if liq and liq < MIN_LIQ:
+        return False, f"LIQ BAIXA ${liq:.0f}"
+    
+    return True, "OK"
 
 # ============================================================
-# SCORE
+# ENCONTRAR TOP TRADERS DINAMICAMENTE
 # ============================================================
-def calculate_score(data, g, avg_buy_size):
-    pontos = 0
-    ratio = data["ratio"]
-    buys = data["buys"]
-    age = data["age"]
-    m5 = data["m5"]
-    accel = data["accel"]
-
-    # Baleias
-    if avg_buy_size >= 800: pontos += 6
-    elif avg_buy_size >= 400: pontos += 4
-    elif avg_buy_size >= 200: pontos += 2
-
-    # Ratio
-    if ratio >= 4: pontos += 5
-    elif ratio >= 2.5: pontos += 4
-    elif ratio >= 1.8: pontos += 2
-
-    # Idade
-    if age <= 5: pontos += 5
-    elif age <= 15: pontos += 3
-    elif age <= 30: pontos += 1
-
-    # Momentum
-    if m5 >= 20: pontos += 4
-    elif m5 >= 8: pontos += 2
-
-    # Aceleração
-    if accel >= 2.5: pontos += 4
-    elif accel >= 1.5: pontos += 2
-
-    # Smart money
-    smart = g.get("smart", 0) if g else 0
-    if smart >= 4: pontos += 7
-    elif smart >= 2: pontos += 4
-    elif smart >= 1: pontos += 2
-
-    # Holders
-    holders = g.get("holders", 0) if g else 0
-    if holders >= 200: pontos += 4
-    elif holders >= 80: pontos += 2
-    elif holders >= 30: pontos += 1
-
-    return pontos
-
-# ============================================================
-# PROCESSAMENTO PRINCIPAL (COM EXECUÇÃO DE TRADES)
-# ============================================================
-def processar(pair):
+def find_top_traders():
+    """Encontra os melhores traders do momento"""
+    global top_traders, last_update
+    
+    print("[UPDATE] Buscando top traders...")
+    
     try:
-        if pair.get("chainId") != "solana":
+        # 1. Busca tokens em alta
+        trending = get_trending_tokens()
+        if not trending:
+            print("[UPDATE] Falha ao buscar trending tokens")
             return
-
-        base = pair.get("baseToken", {})
-        addr = base.get("address")
-        if not addr:
+        
+        tokens = trending.get("data", {}).get("rank", [])
+        if not tokens:
+            print("[UPDATE] Nenhum token em alta encontrado")
             return
-
-        price = pair.get("priceUsd")
-        if not price:
-            return
-        price_val = float(price)
-
-        liq = pair.get("liquidity", {}).get("usd", 0) or 0
-        if liq < MIN_LIQ or liq > MAX_LIQ:
-            return
-
-        vol = pair.get("volume", {})
-        vol5m = vol.get("m5", 0) or 0
-        if vol5m < MIN_VOL5M:
-            return
-
-        tx = pair.get("txns", {}).get("m5", {})
-        buys = tx.get("buys", 0)
-        sells = tx.get("sells", 0)
-
-        if buys < MIN_BUYS:
-            return
-
-        ratio = buys / max(sells, 1)
-        if ratio < MIN_RATIO:
-            return
-
-        pc = pair.get("priceChange", {})
-        m5 = pc.get("m5", 0) or 0
-        if m5 < MIN_M5:
-            return
-
-        created = pair.get("pairCreatedAt")
-        age = (time.time() * 1000 - created) / 60000 if created else 999
-        if age < MIN_AGE or age > MAX_AGE:
-            return
-
-        accel = vol5m / max(vol.get("h1", 0) / 12, 1) if vol.get("h1", 0) > 0 else 0
-
-        # Verifica se já está em posição ou já processado
-        with lock:
-            if addr in positions or addr in history:
-                return
-
-        # Consulta GMGN
-        g = get_token_info(addr)
-        if not g:
-            return
-            
-        lixo, motivo = is_lixo(g)
-        if lixo:
-            return
-
-        # Smart money mínimo
-        if g.get("smart", 0) < MIN_SMART:
-            return
-
-        avg_buy_size = vol5m / max(buys, 1)
-        if avg_buy_size < MIN_WHALE_AVG_SIZE:
-            return
-
-        # Calcula score
-        score = calculate_score({
-            "ratio": ratio, "buys": buys, "age": age,
-            "m5": m5, "accel": accel
-        }, g, avg_buy_size)
-
-        # Só compra se score >= 20 (ELITE ou WHALE)
-        if score < 20:
-            return
-
-        symbol = base.get("symbol", "???")
-        now_ts = time.time()
-
-        # ============================================================
-        # EXECUTA COMPRA AUTOMÁTICA
-        # ============================================================
-        try:
-            send(f"🟢 *EXECUTANDO COMPRA*\n\n"
-                 f"Token: *${symbol}*\n"
-                 f"Score: `{score}`\n"
-                 f"Valor: `{TRADE_AMOUNT_SOL} SOL`\n"
-                 f"Preço: `${price_val:.10f}`\n\n"
-                 f"⏳ Processando...")
-            
-            # Executa a compra
-            trade_result = execute_swap(addr, TRADE_AMOUNT_SOL, SLIPPAGE)
-            
-            if trade_result and trade_result.get("success"):
-                # Registra a posição
-                with lock:
-                    positions[addr] = {
-                        "symbol": symbol,
-                        "entry_price": price_val,
-                        "amount": TRADE_AMOUNT_SOL,
-                        "tp1": price_val * TP1,
-                        "tp2": price_val * TP2,
-                        "tp3": price_val * TP3,
-                        "stop_loss": price_val * STOP_LOSS,
-                        "entry_time": now_ts,
-                        "tx": trade_result.get("txid", "N/A")
-                    }
-                    stats["trades"] += 1
-                    stats["sent"] += 1
-                    stats["green"] += 1 if score >= 28 else 0
-                    stats["yellow"] += 1 if 20 <= score < 28 else 0
+        
+        print(f"[UPDATE] Encontrados {len(tokens)} tokens em alta")
+        
+        # 2. Para cada token, busca os top traders
+        trader_scores = {}
+        tokens_analisados = 0
+        
+        for token in tokens[:20]:  # Analisa os 20 primeiros
+            token_addr = token.get("address")
+            if not token_addr:
+                continue
                 
-                send(f"✅ *COMPRA REALIZADA COM SUCESSO!*\n\n"
-                     f"💎 *${symbol}*\n"
-                     f"`{addr}`\n\n"
-                     f"💲 Entrada: `${price_val:.10f}`\n"
-                     f"📊 Montante: `{TRADE_AMOUNT_SOL} SOL`\n"
-                     f"🔗 Tx: `{trade_result.get('txid', 'N/A')[:16]}...`\n\n"
-                     f"🎯 TP1: `{TP1}x` (${price_val * TP1:.8f})\n"
-                     f"🚀 TP2: `{TP2}x` (${price_val * TP2:.8f})\n"
-                     f"🌕 TP3: `{TP3}x` (${price_val * TP3:.8f})\n"
-                     f"🛑 STOP: `-{int((1-STOP_LOSS)*100)}%` (${price_val * STOP_LOSS:.8f})")
-            else:
-                send(f"❌ *FALHA NA COMPRA*\n\n"
-                     f"Token: *${symbol}*\n"
-                     f"Erro: {trade_result}")
-                     
-        except Exception as e:
-            send(f"❌ *ERRO NA COMPRA*\n\n"
-                 f"Token: *${symbol}*\n"
-                 f"Erro: {str(e)}")
-            print(f"[TRADE] Erro ao comprar {symbol}: {e}")
+            top_traders_data = get_token_top_traders(token_addr)
+            if not top_traders_data:
+                continue
+                
+            traders = top_traders_data.get("data", [])
+            for trader in traders[:10]:  # Pega os 10 melhores de cada token
+                addr = trader.get("address")
+                profit = trader.get("profit", 0)
+                
+                if addr:
+                    # Acumula pontuação baseada no lucro
+                    if addr not in trader_scores:
+                        trader_scores[addr] = 0
+                    trader_scores[addr] += profit
             
-        # Salva no histórico para evitar repetições
-        with lock:
-            history[addr] = {"symbol": symbol, "ts": now_ts}
-
+            tokens_analisados += 1
+            time.sleep(0.3)  # Pequena pausa para não sobrecarregar
+        
+        # 3. Ordena traders por pontuação
+        sorted_traders = sorted(trader_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # 4. Pega os TOP 5
+        new_top_traders = [addr for addr, score in sorted_traders[:TOP_TRADERS_COUNT]]
+        
+        if new_top_traders:
+            with lock:
+                top_traders = new_top_traders
+                last_update = time.time()
+            
+            send(f"📋 *TOP TRADERS ATUALIZADOS*\n\n"
+                 f"Novos top traders encontrados:\n"
+                 + "\n".join([f"`{t[:8]}...{t[-8:]}`" for t in top_traders]) +
+                 f"\n\n🔄 Baseado em {tokens_analisados} tokens em alta\n"
+                 f"⏰ Atualizado em {datetime.now().strftime('%H:%M')}")
+            
+            print(f"[UPDATE] Novos top traders: {len(top_traders)} encontrados")
+        else:
+            print("[UPDATE] Nenhum trader encontrado - mantendo lista anterior")
+            
     except Exception as e:
-        print(f"[PROCESS] {e}")
+        print(f"[UPDATE] Erro: {e}")
 
 # ============================================================
-# MONITORAMENTO DE POSIÇÕES (SAÍDA AUTOMÁTICA)
+# MONITORAR ATIVIDADES DOS TRADERS
 # ============================================================
-def monitorar_posicoes():
-    """Monitora posições ativas e executa vendas nos alvos"""
+def monitor_traders():
+    """Monitora as atividades dos top traders em tempo real"""
+    global last_update
+    
+    while True:
+        try:
+            # Atualiza lista de top traders periodicamente
+            if time.time() - last_update > TOP_TRADERS_UPDATE_INTERVAL:
+                find_top_traders()
+            
+            with lock:
+                traders = top_traders.copy()
+            
+            if not traders:
+                time.sleep(10)
+                continue
+            
+            for trader in traders:
+                # Busca atividades recentes
+                activities = get_trader_activity(trader)
+                if not activities:
+                    continue
+                
+                # Analisa cada atividade
+                for activity in activities.get("data", []):
+                    if activity.get("type") != "buy":
+                        continue
+                    
+                    token_addr = activity.get("token_address")
+                    if not token_addr:
+                        continue
+                    
+                    # Verifica se já executou este trade
+                    trade_key = f"{trader}_{token_addr}"
+                    with lock:
+                        if trade_key in executed_trades:
+                            continue
+                        executed_trades[trade_key] = time.time()
+                    
+                    # Análise rápida do token
+                    token_info = get_token_info(token_addr)
+                    is_ok, reason = quick_token_analysis(token_info)
+                    
+                    if not is_ok:
+                        continue
+                    
+                    symbol = token_info.get("data", {}).get("symbol", "???")
+                    price = token_info.get("data", {}).get("price", 0)
+                    
+                    # ============================================
+                    # EXECUTA COPY TRADE
+                    # ============================================
+                    try:
+                        send(f"🔄 *COPY TRADE DETECTADO*\n\n"
+                             f"🐋 Trader: `{trader[:8]}...{trader[-8:]}`\n"
+                             f"💎 Token: *${symbol}*\n\n"
+                             f"⏳ Executando compra com `{TRADE_AMOUNT_SOL} SOL`...")
+                        
+                        result = execute_swap(token_addr, TRADE_AMOUNT_SOL, SLIPPAGE)
+                        
+                        if result and result.get("success"):
+                            with lock:
+                                stats["trades"] += 1
+                            
+                            if trader not in trader_positions:
+                                trader_positions[trader] = {}
+                            trader_positions[trader][token_addr] = {
+                                "symbol": symbol,
+                                "entry_price": price,
+                                "amount": TRADE_AMOUNT_SOL,
+                                "entry_time": time.time(),
+                                "trader": trader,
+                                "tx": result.get("txid", "N/A")
+                            }
+                            
+                            send(f"✅ *COPY TRADE EXECUTADO*\n\n"
+                                 f"💎 *${symbol}*\n"
+                                 f"💲 Entrada: `${price:.8f}`\n"
+                                 f"📊 Montante: `{TRADE_AMOUNT_SOL} SOL`\n"
+                                 f"🔗 Tx: `{result.get('txid', 'N/A')[:16]}...`")
+                        else:
+                            send(f"❌ *FALHA NO COPY TRADE*\n\n"
+                                 f"Token: *${symbol}*\n"
+                                 f"Erro: {result}")
+                            
+                    except Exception as e:
+                        send(f"❌ *ERRO:* {str(e)}")
+                        print(f"[COPY] Erro: {e}")
+            
+        except Exception as e:
+            print(f"[MONITOR] Erro: {e}")
+        
+        time.sleep(SCAN_DELAY)
+
+# ============================================================
+# MONITORAR SAÍDA DOS TRADERS
+# ============================================================
+def monitor_exits():
+    """Monitora quando os traders vendem para sair junto"""
     while True:
         try:
             with lock:
-                if not positions:
-                    time.sleep(5)
-                    continue
-                    
-                for addr, pos in list(positions.items()):
-                    # Consulta preço atual
-                    pair_data = session.get(
-                        f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
-                        headers=HEADERS,
-                        timeout=5
-                    )
-                    
-                    if pair_data.status_code != 200:
-                        continue
-                        
-                    data = pair_data.json()
-                    if not data.get("pairs"):
-                        continue
-                        
-                    current_price = float(data["pairs"][0]["priceUsd"])
-                    symbol = pos["symbol"]
-                    
-                    # Verifica stop-loss
-                    if current_price <= pos["stop_loss"]:
-                        # Executa venda (stop-loss)
-                        send(f"🔻 *STOP-LOSS ATIVADO*\n\n"
-                             f"Token: *${symbol}*\n"
-                             f"Preço entrada: `${pos['entry_price']:.8f}`\n"
-                             f"Preço atual: `${current_price:.8f}`\n"
-                             f"Perda: `-{int((1 - current_price/pos['entry_price']) * 100)}%`\n\n"
-                             f"⏳ Executando venda...")
-                        
-                        sell_result = execute_sell(addr, pos["amount"], SLIPPAGE)
-                        if sell_result and sell_result.get("success"):
-                            send(f"✅ *VENDA EXECUTADA (STOP-LOSS)*\n\n"
-                                 f"Token: *${symbol}*\n"
-                                 f"Preço: `${current_price:.8f}`\n"
-                                 f"Tx: `{sell_result.get('txid', 'N/A')[:16]}...`")
-                        else:
-                            send(f"❌ *FALHA NA VENDA (STOP-LOSS)*\n\n"
-                                 f"Token: *${symbol}*\n"
-                                 f"Erro: {sell_result}")
-                        
-                        del positions[addr]
-                        continue
-                    
-                    # Verifica take-profits
-                    if current_price >= pos["tp3"]:
-                        # Vende 50% no TP3
-                        sell_amount = pos["amount"] * 0.5
-                        send(f"🚀 *TP3 ATINGIDO! (7x)*\n\n"
-                             f"Token: *${symbol}*\n"
-                             f"Preço: `${current_price:.8f}`\n"
-                             f"Lucro: `+{int((current_price/pos['entry_price'] - 1) * 100)}%`\n\n"
-                             f"⏳ Vendendo 50%...")
-                        
-                        sell_result = execute_sell(addr, sell_amount, SLIPPAGE)
-                        if sell_result and sell_result.get("success"):
-                            send(f"✅ *VENDA PARCIAL (TP3)*\n\n"
-                                 f"Token: *${symbol}*\n"
-                                 f"Preço: `${current_price:.8f}`\n"
-                                 f"Tx: `{sell_result.get('txid', 'N/A')[:16]}...`\n"
-                                 f"Restante: moonbag para TP4+")
-                            # Atualiza posição
-                            pos["amount"] -= sell_amount
-                            if pos["amount"] <= 0:
-                                del positions[addr]
-                        continue
-                    
-                    if current_price >= pos["tp2"]:
-                        # Vende 30% no TP2
-                        sell_amount = pos["amount"] * 0.3
-                        send(f"🚀 *TP2 ATINGIDO! (3.5x)*\n\n"
-                             f"Token: *${symbol}*\n"
-                             f"Preço: `${current_price:.8f}`\n"
-                             f"Lucro: `+{int((current_price/pos['entry_price'] - 1) * 100)}%`\n\n"
-                             f"⏳ Vendendo 30%...")
-                        
-                        sell_result = execute_sell(addr, sell_amount, SLIPPAGE)
-                        if sell_result and sell_result.get("success"):
-                            send(f"✅ *VENDA PARCIAL (TP2)*\n\n"
-                                 f"Token: *${symbol}*\n"
-                                 f"Preço: `${current_price:.8f}`\n"
-                                 f"Tx: `{sell_result.get('txid', 'N/A')[:16]}...`")
-                            pos["amount"] -= sell_amount
-                        continue
-                    
-                    if current_price >= pos["tp1"]:
-                        # Vende 20% no TP1
-                        sell_amount = pos["amount"] * 0.2
-                        send(f"📈 *TP1 ATINGIDO! (1.8x)*\n\n"
-                             f"Token: *${symbol}*\n"
-                             f"Preço: `${current_price:.8f}`\n"
-                             f"Lucro: `+{int((current_price/pos['entry_price'] - 1) * 100)}%`\n\n"
-                             f"⏳ Vendendo 20%...")
-                        
-                        sell_result = execute_sell(addr, sell_amount, SLIPPAGE)
-                        if sell_result and sell_result.get("success"):
-                            send(f"✅ *VENDA PARCIAL (TP1)*\n\n"
-                                 f"Token: *${symbol}*\n"
-                                 f"Preço: `${current_price:.8f}`\n"
-                                 f"Tx: `{sell_result.get('txid', 'N/A')[:16]}...`")
-                            pos["amount"] -= sell_amount
-                        continue
-                        
-        except Exception as e:
-            print(f"[MONITOR] Erro: {e}")
+                positions = trader_positions.copy()
             
-        time.sleep(10)  # Verifica a cada 10 segundos
-
-# ============================================================
-# SCANNER
-# ============================================================
-def scan():
-    idx = 0
-    while True:
-        try:
-            url = ENDPOINTS[idx % len(ENDPOINTS)]
-            idx += 1
-            r = session.get(url, headers=HEADERS, timeout=10)
-            if r.status_code == 200:
-                pairs = r.json().get("pairs") or []
-                for pair in pairs:
-                    processar(pair)
+            for trader, tokens in positions.items():
+                activities = get_trader_activity(trader)
+                if not activities:
+                    continue
+                
+                for token_addr, pos in list(tokens.items()):
+                    for activity in activities.get("data", []):
+                        if (activity.get("type") == "sell" and 
+                            activity.get("token_address") == token_addr):
+                            
+                            symbol = pos["symbol"]
+                            send(f"🔻 *SAÍDA DO TRADER*\n\n"
+                                 f"Token: *${symbol}*\n"
+                                 f"⏳ Executando venda...")
+                            
+                            sell_result = execute_swap(token_addr, pos["amount"], SLIPPAGE)
+                            
+                            if sell_result and sell_result.get("success"):
+                                send(f"✅ *VENDA EXECUTADA*\n\n"
+                                     f"Token: *${symbol}*\n"
+                                     f"Preço: `${sell_result.get('price', 0):.8f}`")
+                                del trader_positions[trader][token_addr]
+                            break
+            
         except Exception as e:
-            print(f"[SCAN] Erro: {e}")
-        time.sleep(SCAN_DELAY)
+            print(f"[EXIT] Erro: {e}")
+        
+        time.sleep(5)
 
 # ============================================================
 # RELATÓRIO
@@ -555,19 +426,17 @@ def relatorio():
         try:
             with lock:
                 st = dict(stats)
-                pos_count = len(positions)
+                pos_count = sum(len(tokens) for tokens in trader_positions.values())
+                traders_count = len(top_traders)
+            
             txt = (
-                f"📊 *RELATÓRIO 2H*\n\n"
-                f"📤 Alertas: `{st['sent']}`\n"
-                f"🟢 Elite: `{st['green']}`  |  🟡 Whale: `{st['yellow']}`\n"
-                f"💰 Trades executados: `{st['trades']}`\n"
-                f"📈 Posições ativas: `{pos_count}`\n\n"
-                f"🐋 Whale monitor ativo\n"
-                f"🧠 Smart money scanner\n"
-                f"⚡ Stealth buy detector\n"
-                f"🚀 Ultra early monitor\n"
-                f"🛡️ Anti rug system\n"
-                f"💰 Trading automatizado ativo"
+                f"📊 *RELATÓRIO 2H - COPY TRADING DINÂMICO*\n\n"
+                f"💰 Trades: `{st['trades']}`\n"
+                f"📈 Posições: `{pos_count}`\n"
+                f"🐋 Traders monitorados: `{traders_count}`\n\n"
+                f"🔄 Top traders atualizados a cada 10min\n"
+                f"🛡️ Anti-rug ativo\n"
+                f"💰 Entrada: `{TRADE_AMOUNT_SOL} SOL`"
             )
             send(txt)
         except Exception as e:
@@ -580,42 +449,36 @@ def relatorio():
 @app.route("/")
 def health():
     with lock:
-        pos_count = len(positions)
-    return f"WHALE HUNTER v10.0 | alertas={stats['sent']} | trades={stats['trades']} | posicoes={pos_count}"
+        pos_count = sum(len(tokens) for tokens in trader_positions.values())
+    return f"COPY TRADING | traders={len(top_traders)} | trades={stats['trades']} | posicoes={pos_count}"
 
-@app.route("/positions")
-def get_positions():
+@app.route("/traders")
+def get_traders():
     with lock:
-        return dict(positions)
-
-@app.route("/stats")
-def get_stats():
-    return dict(stats)
+        return {"top_traders": top_traders}
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v10.0 (AUTOMATIZADO) ===")
+    print("=== INICIANDO WHALE HUNTER v12.0 (COPY TRADING DINÂMICO) ===")
     
-    send("🟢 *WHALE HUNTER v10.0 ONLINE*\n\n"
-         "🤖 *MODO AUTOMATIZADO ATIVO*\n"
-         "💰 Compras e vendas automáticas\n"
-         "🎯 TP1: 1.8x | TP2: 3.5x | TP3: 7x\n"
-         "🛑 Stop-loss: -15%\n\n"
-         f"📊 Trade amount: `{TRADE_AMOUNT_SOL} SOL`\n"
-         f"🔍 Filtros ativos: SMART>={MIN_SMART}, BUYS>={MIN_BUYS}, RATIO>={MIN_RATIO}\n\n"
-         "⚠️ *Monitore os logs para verificar execuções*")
+    # Busca inicial de top traders
+    find_top_traders()
+    
+    send("🟢 *WHALE HUNTER v12.0 ONLINE*\n\n"
+         "🤖 *Copy Trading DINÂMICO*\n"
+         "🔄 Top traders atualizados a cada 10min\n"
+         f"💰 Entrada: `{TRADE_AMOUNT_SOL} SOL`\n"
+         f"🐋 Monitorando top traders automaticamente\n"
+         "🛡️ Anti-rug ativo\n\n"
+         "⚠️ *O bot encontra os melhores traders do momento*")
 
     # Inicia threads
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()
-    threading.Thread(target=monitorar_posicoes, daemon=True).start()
-    
-    # Threads de scan
-    for _ in range(5):
-        threading.Thread(target=scan, daemon=True).start()
-        time.sleep(0.2)
+    threading.Thread(target=monitor_exits, daemon=True).start()
+    threading.Thread(target=monitor_traders, daemon=True).start()
 
     # Inicia Flask
     port = int(os.environ.get("PORT", 10000))

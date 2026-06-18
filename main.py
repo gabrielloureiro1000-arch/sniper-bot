@@ -1,16 +1,10 @@
 # ============================================================
-# WHALE HUNTER v13.0 - COPY TRADING COM DEXSCREENER
+# WHALE HUNTER v13.1 - FILTROS AJUSTADOS
 # ============================================================
-# - Usa DexScreener para encontrar tokens em alta
-# - Usa Birdeye para dados de holders e smart money
-# - Monitora atividades de traders via GMGN (quando possível)
-# ============================================================
-
 import os
 import time
 import threading
 import requests
-import json
 import telebot
 from flask import Flask
 from queue import Queue, Empty
@@ -25,9 +19,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
-# ============================================================
-# FLASK
-# ============================================================
 app = Flask(__name__)
 
 # ============================================================
@@ -43,30 +34,31 @@ session.mount("http://", adapter)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ============================================================
-# CONFIGURAÇÕES DE TRADING
+# CONFIGURAÇÕES DE TRADING (FILTROS MAIS LEVES)
 # ============================================================
 SCAN_DELAY = 5
 REPORT_INTERVAL = 7200
-TOP_TRADERS_UPDATE_INTERVAL = 600
+TOP_TOKENS_UPDATE_INTERVAL = 600
 
 TRADE_AMOUNT_SOL = 0.01
 SLIPPAGE = 15
 
-# Filtros
-MIN_LIQ = 3000
-MAX_TOP10 = 40
-MAX_DEV_HOLD = 20
-MAX_TAX = 25
-MIN_VOL5M = 500
-MIN_BUYS = 5
-MIN_RATIO = 1.5
+# FILTROS MAIS LEVES
+MIN_LIQ = 2000          # Liquidez mínima
+MAX_TOP10 = 60          # Top10 máximo
+MAX_DEV_HOLD = 30       # Dev hold máximo
+MAX_TAX = 30            # Taxa máxima
+MIN_VOL5M = 200         # Volume 5m mínimo
+MIN_BUYS = 3            # Compras mínimas
+MIN_RATIO = 1.2         # Ratio buys/sells
+MIN_M5_CHANGE = 0.5     # Alta mínima em 5m (%)
+MAX_AGE = 120           # Idade máxima (minutos)
 
 # ============================================================
 # ESTADO GLOBAL
 # ============================================================
 lock = threading.Lock()
 top_tokens = []
-tracked_tokens = {}
 executed_trades = {}
 stats = {"trades": 0, "profits": 0, "losses": 0, "alerts": 0}
 tg_queue = Queue()
@@ -97,7 +89,7 @@ def send(msg):
         pass
 
 # ============================================================
-# DEXSCREENER API (Funciona no Render)
+# DEXSCREENER API
 # ============================================================
 def get_trending_from_dexscreener():
     """Busca tokens em alta via DexScreener"""
@@ -115,7 +107,6 @@ def get_trending_from_dexscreener():
             if response.status_code == 200:
                 data = response.json()
                 pairs = data.get("pairs", [])
-                # Filtra apenas Solana com volume
                 for pair in pairs:
                     if pair.get("chainId") == "solana":
                         vol5m = pair.get("volume", {}).get("m5", 0) or 0
@@ -123,16 +114,15 @@ def get_trending_from_dexscreener():
                             all_pairs.append(pair)
             time.sleep(0.3)
         
-        # Ordena por volume 5m (mais ativos primeiro)
         all_pairs.sort(key=lambda x: x.get("volume", {}).get("m5", 0) or 0, reverse=True)
-        return all_pairs[:50]  # Pega os 50 mais ativos
+        return all_pairs[:50]
         
     except Exception as e:
         print(f"[DEX] Erro: {e}")
         return []
 
 # ============================================================
-# BIRDEYE API (Fallback para dados de holders)
+# BIRDEYE API (Fallback)
 # ============================================================
 def get_token_holders_birdeye(token_addr):
     """Busca dados de holders via Birdeye"""
@@ -151,7 +141,7 @@ def get_token_holders_birdeye(token_addr):
     return None
 
 # ============================================================
-# ANÁLISE DO TOKEN
+# ANÁLISE DO TOKEN (FILTROS MAIS LEVES)
 # ============================================================
 def analyze_token(pair):
     """Analisa um token usando dados do DexScreener"""
@@ -161,7 +151,6 @@ def analyze_token(pair):
         if not addr:
             return None
         
-        # Métricas básicas
         liq = pair.get("liquidity", {}).get("usd", 0) or 0
         if liq < MIN_LIQ:
             return None
@@ -183,12 +172,12 @@ def analyze_token(pair):
         
         price_change = pair.get("priceChange", {})
         m5 = price_change.get("m5", 0) or 0
-        if m5 < 1:  # Precisa ter alta de pelo menos 1%
+        if m5 < MIN_M5_CHANGE:
             return None
         
         created = pair.get("pairCreatedAt")
         age = (time.time() * 1000 - created) / 60000 if created else 999
-        if age > 60:  # Máximo 60 minutos
+        if age > MAX_AGE:
             return None
         
         symbol = base.get("symbol", "???")
@@ -199,9 +188,12 @@ def analyze_token(pair):
         holders = holders_data.get("holders", 0) if holders_data else 0
         top10 = holders_data.get("top10", 0) if holders_data else 0
         
-        # Verifica top10 (se disponível)
+        # Verifica top10 apenas se tiver dados
         if top10 and top10 > MAX_TOP10:
             return None
+        
+        # Calcula score
+        score = min(100, (buys * 3) + (ratio * 10) + (m5 * 3) + (holders / 5))
         
         return {
             "address": addr,
@@ -216,7 +208,7 @@ def analyze_token(pair):
             "age": age,
             "holders": holders,
             "top10": top10,
-            "score": min(100, (buys * 2) + (ratio * 10) + (m5 * 2) + (holders / 10))
+            "score": score
         }
         
     except Exception as e:
@@ -240,7 +232,6 @@ def find_top_tokens():
         
         print(f"[UPDATE] Encontrados {len(pairs)} tokens em alta")
         
-        # Analisa cada token
         analyzed = []
         for pair in pairs[:50]:
             token_data = analyze_token(pair)
@@ -252,27 +243,30 @@ def find_top_tokens():
             print("[UPDATE] Nenhum token aprovado pelos filtros")
             return
         
-        # Ordena por score
         analyzed.sort(key=lambda x: x["score"], reverse=True)
         
-        # Pega os top 10
         with lock:
             top_tokens = analyzed[:10]
             last_update = time.time()
         
-        send(f"📋 *TOP TOKENS ATUALIZADOS*\n\n"
-             f"Encontrados {len(top_tokens)} tokens promissores:\n"
-             + "\n".join([f"💎 *${t['symbol']}* - Score: {t['score']:.0f}" for t in top_tokens[:5]]) +
-             f"\n\n🔄 Baseado em volume e atividade\n"
-             f"⏰ Atualizado em {datetime.now().strftime('%H:%M')}")
+        # Envia alerta no Telegram
+        msg = f"📋 *TOP TOKENS ATUALIZADOS*\n\n"
+        msg += f"Encontrados {len(top_tokens)} tokens promissores:\n\n"
+        for i, t in enumerate(top_tokens[:5], 1):
+            msg += f"{i}. 💎 *${t['symbol']}*\n"
+            msg += f"   Score: `{t['score']:.0f}` | Ratio: `{t['ratio']:.1f}x`\n"
+            msg += f"   Compras: `{t['buys']}` | Alta: `{t['m5']:+.1f}%`\n\n"
+        msg += f"🔄 Baseado em volume e atividade\n"
+        msg += f"⏰ Atualizado em {datetime.now().strftime('%H:%M')}"
         
+        send(msg)
         print(f"[UPDATE] Top tokens: {len(top_tokens)} encontrados")
         
     except Exception as e:
         print(f"[UPDATE] Erro: {e}")
 
 # ============================================================
-# MONITORAR TOKENS (Sem GMGN)
+# MONITORAR TOKENS
 # ============================================================
 def monitor_tokens():
     """Monitora os tokens em tempo real e executa trades"""
@@ -280,8 +274,7 @@ def monitor_tokens():
     
     while True:
         try:
-            # Atualiza lista periodicamente
-            if time.time() - last_update > TOP_TRADERS_UPDATE_INTERVAL:
+            if time.time() - last_update > TOP_TOKENS_UPDATE_INTERVAL:
                 find_top_tokens()
             
             with lock:
@@ -294,20 +287,15 @@ def monitor_tokens():
             for token in tokens:
                 addr = token["address"]
                 
-                # Verifica se já executou este trade
                 with lock:
                     if addr in executed_trades:
                         continue
                     executed_trades[addr] = time.time()
                 
-                # Verifica se é um bom momento para entrar
-                # (simula entrada junto com "smart money")
-                if token["score"] < 50:
+                # Só executa trade se score for alto
+                if token["score"] < 30:
                     continue
                 
-                # ============================================
-                # EXECUTA TRADE
-                # ============================================
                 try:
                     symbol = token["symbol"]
                     price = token["price"]
@@ -323,11 +311,7 @@ def monitor_tokens():
                          f"⭐ Score: `{token['score']:.0f}`\n\n"
                          f"⏳ Executando compra com `{TRADE_AMOUNT_SOL} SOL`...")
                     
-                    # AQUI VOCÊ PODE ADICIONAR A LÓGICA DE COMPRA
-                    # Como a GMGN API não está acessível, use outra DEX
-                    # Ex: Jupiter, Raydium, etc.
-                    
-                    # Simula compra (substituir por execução real)
+                    # SIMULA COMPRA (substituir por execução real)
                     with lock:
                         stats["trades"] += 1
                         stats["alerts"] += 1
@@ -337,7 +321,8 @@ def monitor_tokens():
                          f"💲 Entrada: `${price:.8f}`\n"
                          f"📊 Montante: `{TRADE_AMOUNT_SOL} SOL`\n\n"
                          f"🎯 TP1: `1.8x` | TP2: `3.5x` | TP3: `7x`\n"
-                         f"🛑 STOP: `-15%`")
+                         f"🛑 STOP: `-15%`\n\n"
+                         f"🔍 GMGN: https://gmgn.ai/sol/token/{addr}")
                     
                 except Exception as e:
                     send(f"❌ *ERRO:* {str(e)}")
@@ -380,7 +365,7 @@ def relatorio():
 def health():
     with lock:
         tokens_count = len(top_tokens)
-    return f"WHALE HUNTER v13.0 | tokens={tokens_count} | trades={stats['trades']}"
+    return f"WHALE HUNTER v13.1 | tokens={tokens_count} | trades={stats['trades']} | alerts={stats['alerts']}"
 
 @app.route("/tokens")
 def get_tokens():
@@ -391,25 +376,22 @@ def get_tokens():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v13.0 (DEXSCREENER) ===")
+    print("=== INICIANDO WHALE HUNTER v13.1 (FILTROS AJUSTADOS) ===")
     
-    # Busca inicial
     find_top_tokens()
     
-    send("🟢 *WHALE HUNTER v13.0 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v13.1 ONLINE*\n\n"
          "🔍 *Modo: DexScreener + Birdeye*\n"
          "🔄 Tokens atualizados a cada 10min\n"
          f"💰 Entrada: `{TRADE_AMOUNT_SOL} SOL`\n"
-         "🛡️ Filtros anti-rug ativos\n\n"
-         "✅ *SEM DEPENDÊNCIA DA GMGN API*\n"
-         "🔄 Monitorando tokens em alta")
+         "🛡️ Filtros ajustados para capturar mais tokens\n\n"
+         "✅ *Monitorando tokens em alta*\n"
+         "📊 Enviando alertas de tokens promissores")
 
-    # Inicia threads
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()
     threading.Thread(target=monitor_tokens, daemon=True).start()
 
-    # Inicia Flask
     port = int(os.environ.get("PORT", 10000))
     print(f"=== BOT RODANDO na porta {port} ===")
     app.run(host="0.0.0.0", port=port)

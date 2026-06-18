@@ -4,3 +4,4 @@ requests
 urllib3
 solders
 base58
+gmgn-sdk

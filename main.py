@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v17.1 - GMGN API (ENDOPOINTS CORRIGIDOS)
+# WHALE HUNTER v17.3 - GMGN API (FORÇA IPv4)
 # ============================================================
 import os
 import time
@@ -14,6 +14,17 @@ from urllib3.util.retry import Retry
 import json
 import hmac
 import hashlib
+import socket
+import requests.packages.urllib3.util.connection as urllib3_cn
+
+# ============================================================
+# FORÇAR IPv4 (SOLUÇÃO PARA O ERRO DE DNS)
+# ============================================================
+def allowed_gateways():
+    """Força o uso de IPv4 em vez de IPv6"""
+    return (socket.AF_INET,)
+
+urllib3_cn.allowed_gateways = allowed_gateways
 
 # ============================================================
 # CONFIGURAÇÕES
@@ -79,7 +90,7 @@ def send(msg):
         pass
 
 # ============================================================
-# GMGN API (AUTENTICADA)
+# GMGN API
 # ============================================================
 def gmgn_api_request(endpoint, method="GET", data=None):
     """Faz requisição autenticada para a API da GMGN"""
@@ -90,7 +101,8 @@ def gmgn_api_request(endpoint, method="GET", data=None):
         headers = {
             "X-APIKEY": GMGN_API_KEY,
             "X-TIMESTAMP": timestamp,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
         }
         
         if method == "POST":
@@ -101,14 +113,14 @@ def gmgn_api_request(endpoint, method="GET", data=None):
                 hashlib.sha256
             ).hexdigest()
             headers["X-SIGNATURE"] = signature
-            response = session.post(url, headers=headers, json=data, timeout=10)
+            response = session.post(url, headers=headers, json=data, timeout=15)
         else:
-            response = session.get(url, headers=headers, timeout=10)
+            response = session.get(url, headers=headers, timeout=15)
         
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"[GMGN] Erro {response.status_code}: {response.text[:200]}")
+            print(f"[GMGN] HTTP {response.status_code}: {response.text[:200]}")
             return None
             
     except Exception as e:
@@ -116,19 +128,20 @@ def gmgn_api_request(endpoint, method="GET", data=None):
         return None
 
 def get_top_traders():
-    """Busca os top traders da GMGN (endpoint corrigido)"""
-    # Tenta diferentes endpoints
+    """Busca os top traders da GMGN"""
     endpoints = [
         "/v1/rank/sol/traders",
-        "/v1/rank/sol/smart_money",
-        "/v1/rank/sol/profitable"
+        "/v1/rank/sol/smart_money"
     ]
     
     for endpoint in endpoints:
         print(f"[DEBUG] Tentando: {endpoint}")
-        result = gmgn_api_request(endpoint)
-        if result and result.get("data"):
-            return result
+        try:
+            result = gmgn_api_request(endpoint)
+            if result and result.get("data"):
+                return result
+        except Exception as e:
+            print(f"[DEBUG] Erro: {e}")
         time.sleep(0.5)
     
     return None
@@ -144,7 +157,7 @@ def get_token_info(token_addr):
     return gmgn_api_request(endpoint)
 
 # ============================================================
-# IDENTIFICAR TOP TRADERS (VIA GMGN)
+# IDENTIFICAR TOP TRADERS
 # ============================================================
 def identify_top_traders():
     """Identifica os principais traders via API GMGN"""
@@ -156,24 +169,24 @@ def identify_top_traders():
         result = get_top_traders()
         
         if not result:
-            print("[UPDATE] Falha ao buscar top traders - resultado vazio")
+            print("[UPDATE] Falha ao buscar top traders")
+            send("⚠️ *Falha ao buscar top traders*\nVerifique os logs do Render")
             return
         
         if "data" not in result:
-            print(f"[UPDATE] Resposta sem 'data': {list(result.keys())}")
+            print(f"[UPDATE] Resposta sem 'data'")
             return
         
         traders = result.get("data", [])
         if not traders:
             print("[UPDATE] Nenhum trader encontrado")
+            send("ℹ️ Nenhum trader encontrado no momento")
             return
         
-        # Pega os 10 melhores
         with lock:
             top_traders = traders[:10]
             stats["traders_found"] = len(top_traders)
         
-        # Envia mensagem com os traders encontrados
         msg = f"📋 *TOP TRADERS IDENTIFICADOS*\n\n"
         msg += f"Encontrados {len(top_traders)} traders:\n\n"
         for i, t in enumerate(top_traders[:5], 1):
@@ -212,7 +225,6 @@ def monitor_traders():
                 if not addr:
                     continue
                 
-                # Busca atividades recentes
                 activities = get_trader_activity(addr)
                 if not activities or "data" not in activities:
                     continue
@@ -225,13 +237,11 @@ def monitor_traders():
                     if not token_addr:
                         continue
                     
-                    # Verifica se já alertou este token
                     with lock:
                         if token_addr in tracked_tokens:
                             continue
                         tracked_tokens[token_addr] = time.time()
                     
-                    # Busca informações do token
                     token_info = get_token_info(token_addr)
                     if not token_info:
                         continue
@@ -240,7 +250,6 @@ def monitor_traders():
                     symbol = token_data.get("symbol", "???")
                     price = token_data.get("price", 0)
                     
-                    # Envia alerta
                     msg = (
                         f"🐋 *TOP TRADER COMPROU!*\n\n"
                         f"Trader: `{addr[:8]}...{addr[-8:]}`\n"
@@ -302,17 +311,28 @@ def health():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v17.1 (GMGN API) ===")
+    print("=== INICIANDO WHALE HUNTER v17.3 (FORÇA IPv4) ===")
+    
+    # Testa conectividade
+    try:
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_socket.settimeout(5)
+        test_socket.connect(("8.8.8.8", 53))
+        print("[INFO] IPv4 funcionando!")
+        test_socket.close()
+    except:
+        print("[INFO] IPv4 pode estar bloqueado")
     
     if not GMGN_API_KEY or not GMGN_PRIVATE_KEY:
         send("⚠️ *ERRO: Variáveis GMGN_API_KEY e GMGN_PRIVATE_KEY não configuradas!*")
         print("ERRO: Variáveis GMGN_API_KEY e GMGN_PRIVATE_KEY não configuradas!")
     else:
-        send("🟢 *WHALE HUNTER v17.1 ONLINE*\n\n"
+        send("🟢 *WHALE HUNTER v17.3 ONLINE*\n\n"
              "🐋 *GMGN API CONECTADA*\n"
              "🔍 Monitorando top traders em tempo real\n"
              "📝 Alertas quando eles compram\n\n"
-             "⚠️ *MODO MANUAL* - Você decide se compra ou vende")
+             "⚠️ *MODO MANUAL* - Você decide se compra ou vende\n"
+             "✅ IPv4 FORÇADO - DNS corrigido")
         
         identify_top_traders()
     

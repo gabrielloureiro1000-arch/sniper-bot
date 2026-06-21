@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v17.0 - COM GMGN API OFICIAL
+# WHALE HUNTER v17.1 - GMGN API (ENDOPOINTS CORRIGIDOS)
 # ============================================================
 import os
 import time
@@ -11,7 +11,6 @@ from queue import Queue, Empty
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import base58
 import json
 import hmac
 import hashlib
@@ -52,7 +51,7 @@ REPORT_INTERVAL = 7200
 lock = threading.Lock()
 top_traders = []
 tracked_tokens = {}
-stats = {"alerts": 0}
+stats = {"alerts": 0, "traders_found": 0}
 tg_queue = Queue()
 
 # ============================================================
@@ -117,9 +116,22 @@ def gmgn_api_request(endpoint, method="GET", data=None):
         return None
 
 def get_top_traders():
-    """Busca os top traders da GMGN"""
-    endpoint = "/v1/rank/sol/traders"
-    return gmgn_api_request(endpoint)
+    """Busca os top traders da GMGN (endpoint corrigido)"""
+    # Tenta diferentes endpoints
+    endpoints = [
+        "/v1/rank/sol/traders",
+        "/v1/rank/sol/smart_money",
+        "/v1/rank/sol/profitable"
+    ]
+    
+    for endpoint in endpoints:
+        print(f"[DEBUG] Tentando: {endpoint}")
+        result = gmgn_api_request(endpoint)
+        if result and result.get("data"):
+            return result
+        time.sleep(0.5)
+    
+    return None
 
 def get_trader_activity(wallet_addr):
     """Obtém atividades recentes de uma wallet"""
@@ -139,12 +151,16 @@ def identify_top_traders():
     global top_traders, stats
     
     print("[UPDATE] Buscando top traders via GMGN API...")
-    send("🔄 *Atualizando lista de Top Traders*")
     
     try:
         result = get_top_traders()
-        if not result or "data" not in result:
-            print("[UPDATE] Falha ao buscar top traders")
+        
+        if not result:
+            print("[UPDATE] Falha ao buscar top traders - resultado vazio")
+            return
+        
+        if "data" not in result:
+            print(f"[UPDATE] Resposta sem 'data': {list(result.keys())}")
             return
         
         traders = result.get("data", [])
@@ -157,15 +173,24 @@ def identify_top_traders():
             top_traders = traders[:10]
             stats["traders_found"] = len(top_traders)
         
-        send(f"📋 *TOP TRADERS IDENTIFICADOS*\n\n"
-             f"Encontrados {len(top_traders)} traders:\n"
-             + "\n".join([f"🐋 `{t.get('address', 'N/A')[:8]}...{t.get('address', 'N/A')[-8:]}`" for t in top_traders[:5]]) +
-             f"\n\n⏰ Atualizado em {datetime.now().strftime('%H:%M')}")
+        # Envia mensagem com os traders encontrados
+        msg = f"📋 *TOP TRADERS IDENTIFICADOS*\n\n"
+        msg += f"Encontrados {len(top_traders)} traders:\n\n"
+        for i, t in enumerate(top_traders[:5], 1):
+            addr = t.get('address', 'N/A')
+            profit = t.get('profit', 0)
+            msg += f"{i}. 🐋 `{addr[:8]}...{addr[-8:]}`\n"
+            if profit:
+                msg += f"   Lucro: `${profit:,.0f}`\n"
+            msg += "\n"
+        msg += f"⏰ Atualizado em {datetime.now().strftime('%H:%M')}"
         
+        send(msg)
         print(f"[UPDATE] Top traders: {len(top_traders)} encontrados")
         
     except Exception as e:
         print(f"[UPDATE] Erro: {e}")
+        send(f"⚠️ *Erro ao buscar top traders*\n\n{e}")
 
 # ============================================================
 # MONITORAR TRADERS
@@ -277,13 +302,13 @@ def health():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v17.0 (GMGN API) ===")
+    print("=== INICIANDO WHALE HUNTER v17.1 (GMGN API) ===")
     
     if not GMGN_API_KEY or not GMGN_PRIVATE_KEY:
         send("⚠️ *ERRO: Variáveis GMGN_API_KEY e GMGN_PRIVATE_KEY não configuradas!*")
         print("ERRO: Variáveis GMGN_API_KEY e GMGN_PRIVATE_KEY não configuradas!")
     else:
-        send("🟢 *WHALE HUNTER v17.0 ONLINE*\n\n"
+        send("🟢 *WHALE HUNTER v17.1 ONLINE*\n\n"
              "🐋 *GMGN API CONECTADA*\n"
              "🔍 Monitorando top traders em tempo real\n"
              "📝 Alertas quando eles compram\n\n"

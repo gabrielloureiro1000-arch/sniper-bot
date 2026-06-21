@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v13.1 - FILTROS AJUSTADOS
+# WHALE HUNTER v17.0 - COM GMGN API OFICIAL
 # ============================================================
 import os
 import time
@@ -11,6 +11,10 @@ from queue import Queue, Empty
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import base58
+import json
+import hmac
+import hashlib
 
 # ============================================================
 # CONFIGURAÇÕES
@@ -18,6 +22,9 @@ from urllib3.util.retry import Retry
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
+
+GMGN_API_KEY = os.getenv("GMGN_API_KEY")
+GMGN_PRIVATE_KEY = os.getenv("GMGN_PRIVATE_KEY")
 
 app = Flask(__name__)
 
@@ -34,35 +41,19 @@ session.mount("http://", adapter)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ============================================================
-# CONFIGURAÇÕES DE TRADING (FILTROS MAIS LEVES)
+# CONFIGURAÇÕES
 # ============================================================
-SCAN_DELAY = 5
+SCAN_DELAY = 30
 REPORT_INTERVAL = 7200
-TOP_TOKENS_UPDATE_INTERVAL = 600
-
-TRADE_AMOUNT_SOL = 0.01
-SLIPPAGE = 15
-
-# FILTROS MAIS LEVES
-MIN_LIQ = 2000          # Liquidez mínima
-MAX_TOP10 = 60          # Top10 máximo
-MAX_DEV_HOLD = 30       # Dev hold máximo
-MAX_TAX = 30            # Taxa máxima
-MIN_VOL5M = 200         # Volume 5m mínimo
-MIN_BUYS = 3            # Compras mínimas
-MIN_RATIO = 1.2         # Ratio buys/sells
-MIN_M5_CHANGE = 0.5     # Alta mínima em 5m (%)
-MAX_AGE = 120           # Idade máxima (minutos)
 
 # ============================================================
 # ESTADO GLOBAL
 # ============================================================
 lock = threading.Lock()
-top_tokens = []
-executed_trades = {}
-stats = {"trades": 0, "profits": 0, "losses": 0, "alerts": 0}
+top_traders = []
+tracked_tokens = {}
+stats = {"alerts": 0}
 tg_queue = Queue()
-last_update = 0
 
 # ============================================================
 # FUNÇÕES TELEGRAM
@@ -89,249 +80,166 @@ def send(msg):
         pass
 
 # ============================================================
-# DEXSCREENER API
+# GMGN API (AUTENTICADA)
 # ============================================================
-def get_trending_from_dexscreener():
-    """Busca tokens em alta via DexScreener"""
+def gmgn_api_request(endpoint, method="GET", data=None):
+    """Faz requisição autenticada para a API da GMGN"""
     try:
-        endpoints = [
-            "https://api.dexscreener.com/latest/dex/search?q=solana",
-            "https://api.dexscreener.com/latest/dex/search?q=pumpfun",
-            "https://api.dexscreener.com/latest/dex/search?q=raydium",
-            "https://api.dexscreener.com/latest/dex/search?q=solana+meme",
-        ]
+        url = f"https://api.gmgn.ai{endpoint}"
+        timestamp = str(int(time.time() * 1000))
         
-        all_pairs = []
-        for url in endpoints:
-            response = session.get(url, headers=HEADERS, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                pairs = data.get("pairs", [])
-                for pair in pairs:
-                    if pair.get("chainId") == "solana":
-                        vol5m = pair.get("volume", {}).get("m5", 0) or 0
-                        if vol5m > MIN_VOL5M:
-                            all_pairs.append(pair)
-            time.sleep(0.3)
-        
-        all_pairs.sort(key=lambda x: x.get("volume", {}).get("m5", 0) or 0, reverse=True)
-        return all_pairs[:50]
-        
-    except Exception as e:
-        print(f"[DEX] Erro: {e}")
-        return []
-
-# ============================================================
-# BIRDEYE API (Fallback)
-# ============================================================
-def get_token_holders_birdeye(token_addr):
-    """Busca dados de holders via Birdeye"""
-    try:
-        url = f"https://public-api.birdeye.so/defi/token_overview?address={token_addr}"
-        response = session.get(url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "holders": data.get("data", {}).get("holderCount", 0),
-                "top10": data.get("data", {}).get("top10HolderRate", 0),
-                "liquidity": data.get("data", {}).get("liquidity", 0)
-            }
-    except:
-        pass
-    return None
-
-# ============================================================
-# ANÁLISE DO TOKEN (FILTROS MAIS LEVES)
-# ============================================================
-def analyze_token(pair):
-    """Analisa um token usando dados do DexScreener"""
-    try:
-        base = pair.get("baseToken", {})
-        addr = base.get("address")
-        if not addr:
-            return None
-        
-        liq = pair.get("liquidity", {}).get("usd", 0) or 0
-        if liq < MIN_LIQ:
-            return None
-        
-        vol5m = pair.get("volume", {}).get("m5", 0) or 0
-        if vol5m < MIN_VOL5M:
-            return None
-        
-        tx = pair.get("txns", {}).get("m5", {})
-        buys = tx.get("buys", 0)
-        sells = tx.get("sells", 0)
-        
-        if buys < MIN_BUYS:
-            return None
-        
-        ratio = buys / max(sells, 1)
-        if ratio < MIN_RATIO:
-            return None
-        
-        price_change = pair.get("priceChange", {})
-        m5 = price_change.get("m5", 0) or 0
-        if m5 < MIN_M5_CHANGE:
-            return None
-        
-        created = pair.get("pairCreatedAt")
-        age = (time.time() * 1000 - created) / 60000 if created else 999
-        if age > MAX_AGE:
-            return None
-        
-        symbol = base.get("symbol", "???")
-        price = float(pair.get("priceUsd", 0))
-        
-        # Tenta buscar dados de holders (Birdeye)
-        holders_data = get_token_holders_birdeye(addr)
-        holders = holders_data.get("holders", 0) if holders_data else 0
-        top10 = holders_data.get("top10", 0) if holders_data else 0
-        
-        # Verifica top10 apenas se tiver dados
-        if top10 and top10 > MAX_TOP10:
-            return None
-        
-        # Calcula score
-        score = min(100, (buys * 3) + (ratio * 10) + (m5 * 3) + (holders / 5))
-        
-        return {
-            "address": addr,
-            "symbol": symbol,
-            "price": price,
-            "liq": liq,
-            "vol5m": vol5m,
-            "buys": buys,
-            "sells": sells,
-            "ratio": ratio,
-            "m5": m5,
-            "age": age,
-            "holders": holders,
-            "top10": top10,
-            "score": score
+        headers = {
+            "X-APIKEY": GMGN_API_KEY,
+            "X-TIMESTAMP": timestamp,
+            "Content-Type": "application/json"
         }
         
+        if method == "POST":
+            payload = json.dumps(data) if data else ""
+            signature = hmac.new(
+                GMGN_PRIVATE_KEY.encode(),
+                f"{timestamp}{payload}".encode(),
+                hashlib.sha256
+            ).hexdigest()
+            headers["X-SIGNATURE"] = signature
+            response = session.post(url, headers=headers, json=data, timeout=10)
+        else:
+            response = session.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"[GMGN] Erro {response.status_code}: {response.text[:200]}")
+            return None
+            
     except Exception as e:
-        print(f"[ANALYZE] Erro: {e}")
+        print(f"[GMGN] Exceção: {e}")
         return None
 
+def get_top_traders():
+    """Busca os top traders da GMGN"""
+    endpoint = "/v1/rank/sol/traders"
+    return gmgn_api_request(endpoint)
+
+def get_trader_activity(wallet_addr):
+    """Obtém atividades recentes de uma wallet"""
+    endpoint = f"/v1/wallet/sol/{wallet_addr}/activities"
+    return gmgn_api_request(endpoint)
+
+def get_token_info(token_addr):
+    """Obtém informações do token"""
+    endpoint = f"/v1/token/sol/{token_addr}"
+    return gmgn_api_request(endpoint)
+
 # ============================================================
-# ENCONTRAR TOP TOKENS
+# IDENTIFICAR TOP TRADERS (VIA GMGN)
 # ============================================================
-def find_top_tokens():
-    """Encontra os tokens mais promissores"""
-    global top_tokens, last_update
+def identify_top_traders():
+    """Identifica os principais traders via API GMGN"""
+    global top_traders, stats
     
-    print("[UPDATE] Buscando tokens em alta...")
+    print("[UPDATE] Buscando top traders via GMGN API...")
+    send("🔄 *Atualizando lista de Top Traders*")
     
     try:
-        pairs = get_trending_from_dexscreener()
-        if not pairs:
-            print("[UPDATE] Nenhum token encontrado")
+        result = get_top_traders()
+        if not result or "data" not in result:
+            print("[UPDATE] Falha ao buscar top traders")
             return
         
-        print(f"[UPDATE] Encontrados {len(pairs)} tokens em alta")
-        
-        analyzed = []
-        for pair in pairs[:50]:
-            token_data = analyze_token(pair)
-            if token_data:
-                analyzed.append(token_data)
-            time.sleep(0.1)
-        
-        if not analyzed:
-            print("[UPDATE] Nenhum token aprovado pelos filtros")
+        traders = result.get("data", [])
+        if not traders:
+            print("[UPDATE] Nenhum trader encontrado")
             return
         
-        analyzed.sort(key=lambda x: x["score"], reverse=True)
-        
+        # Pega os 10 melhores
         with lock:
-            top_tokens = analyzed[:10]
-            last_update = time.time()
+            top_traders = traders[:10]
+            stats["traders_found"] = len(top_traders)
         
-        # Envia alerta no Telegram
-        msg = f"📋 *TOP TOKENS ATUALIZADOS*\n\n"
-        msg += f"Encontrados {len(top_tokens)} tokens promissores:\n\n"
-        for i, t in enumerate(top_tokens[:5], 1):
-            msg += f"{i}. 💎 *${t['symbol']}*\n"
-            msg += f"   Score: `{t['score']:.0f}` | Ratio: `{t['ratio']:.1f}x`\n"
-            msg += f"   Compras: `{t['buys']}` | Alta: `{t['m5']:+.1f}%`\n\n"
-        msg += f"🔄 Baseado em volume e atividade\n"
-        msg += f"⏰ Atualizado em {datetime.now().strftime('%H:%M')}"
+        send(f"📋 *TOP TRADERS IDENTIFICADOS*\n\n"
+             f"Encontrados {len(top_traders)} traders:\n"
+             + "\n".join([f"🐋 `{t.get('address', 'N/A')[:8]}...{t.get('address', 'N/A')[-8:]}`" for t in top_traders[:5]]) +
+             f"\n\n⏰ Atualizado em {datetime.now().strftime('%H:%M')}")
         
-        send(msg)
-        print(f"[UPDATE] Top tokens: {len(top_tokens)} encontrados")
+        print(f"[UPDATE] Top traders: {len(top_traders)} encontrados")
         
     except Exception as e:
         print(f"[UPDATE] Erro: {e}")
 
 # ============================================================
-# MONITORAR TOKENS
+# MONITORAR TRADERS
 # ============================================================
-def monitor_tokens():
-    """Monitora os tokens em tempo real e executa trades"""
-    global last_update
-    
+def monitor_traders():
+    """Monitora as atividades dos top traders"""
     while True:
         try:
-            if time.time() - last_update > TOP_TOKENS_UPDATE_INTERVAL:
-                find_top_tokens()
-            
             with lock:
-                tokens = top_tokens.copy()
+                traders = top_traders.copy()
             
-            if not tokens:
-                time.sleep(10)
+            if not traders:
+                identify_top_traders()
+                time.sleep(30)
                 continue
             
-            for token in tokens:
-                addr = token["address"]
-                
-                with lock:
-                    if addr in executed_trades:
-                        continue
-                    executed_trades[addr] = time.time()
-                
-                # Só executa trade se score for alto
-                if token["score"] < 30:
+            for trader in traders:
+                addr = trader.get("address")
+                if not addr:
                     continue
                 
-                try:
-                    symbol = token["symbol"]
-                    price = token["price"]
+                # Busca atividades recentes
+                activities = get_trader_activity(addr)
+                if not activities or "data" not in activities:
+                    continue
+                
+                for activity in activities.get("data", []):
+                    if activity.get("type") != "buy":
+                        continue
                     
-                    send(f"🔄 *TOKEN PROMISSOR DETECTADO*\n\n"
-                         f"💎 *${symbol}*\n"
-                         f"`{addr[:8]}...{addr[-8:]}`\n\n"
-                         f"💲 Preço: `${price:.8f}`\n"
-                         f"📊 Volume 5m: `${token['vol5m']:,.0f}`\n"
-                         f"🔥 Buys: `{token['buys']}` | Ratio: `{token['ratio']:.1f}x`\n"
-                         f"📈 Alta: `{token['m5']:+.1f}%`\n"
-                         f"👥 Holders: `{token['holders']}`\n"
-                         f"⭐ Score: `{token['score']:.0f}`\n\n"
-                         f"⏳ Executando compra com `{TRADE_AMOUNT_SOL} SOL`...")
+                    token_addr = activity.get("token_address")
+                    if not token_addr:
+                        continue
                     
-                    # SIMULA COMPRA (substituir por execução real)
+                    # Verifica se já alertou este token
                     with lock:
-                        stats["trades"] += 1
-                        stats["alerts"] += 1
+                        if token_addr in tracked_tokens:
+                            continue
+                        tracked_tokens[token_addr] = time.time()
                     
-                    send(f"✅ *TRADE EXECUTADO*\n\n"
-                         f"💎 *${symbol}*\n"
-                         f"💲 Entrada: `${price:.8f}`\n"
-                         f"📊 Montante: `{TRADE_AMOUNT_SOL} SOL`\n\n"
-                         f"🎯 TP1: `1.8x` | TP2: `3.5x` | TP3: `7x`\n"
-                         f"🛑 STOP: `-15%`\n\n"
-                         f"🔍 GMGN: https://gmgn.ai/sol/token/{addr}")
+                    # Busca informações do token
+                    token_info = get_token_info(token_addr)
+                    if not token_info:
+                        continue
                     
-                except Exception as e:
-                    send(f"❌ *ERRO:* {str(e)}")
-                    print(f"[TRADE] Erro: {e}")
+                    token_data = token_info.get("data", {})
+                    symbol = token_data.get("symbol", "???")
+                    price = token_data.get("price", 0)
+                    
+                    # Envia alerta
+                    msg = (
+                        f"🐋 *TOP TRADER COMPROU!*\n\n"
+                        f"Trader: `{addr[:8]}...{addr[-8:]}`\n"
+                        f"💎 *${symbol}*\n"
+                        f"`{token_addr[:8]}...{token_addr[-8:]}`\n\n"
+                        f"💲 Preço: `${price:.8f}`\n"
+                        f"👥 Holders: `{token_data.get('holder_count', 0)}`\n"
+                        f"🧠 Smart Money: `{token_data.get('smart_degen_count', 0)}`\n\n"
+                        f"🔍 GMGN: https://gmgn.ai/sol/token/{token_addr}\n"
+                        f"📊 DEX: https://dexscreener.com/solana/{token_addr}\n\n"
+                        f"⚠️ *MODO MANUAL* - Analise antes de comprar"
+                    )
+                    
+                    send(msg)
+                    stats["alerts"] += 1
+                    print(f"[ALERTA] {symbol} - Trader: {addr[:8]}...")
+                    
+                time.sleep(1)
+            
+            time.sleep(SCAN_DELAY)
             
         except Exception as e:
             print(f"[MONITOR] Erro: {e}")
-        
-        time.sleep(SCAN_DELAY)
+            time.sleep(10)
 
 # ============================================================
 # RELATÓRIO
@@ -341,17 +249,15 @@ def relatorio():
     while True:
         try:
             with lock:
-                st = dict(stats)
-                tokens_count = len(top_tokens)
+                alerts = stats["alerts"]
+                traders = stats.get("traders_found", 0)
             
             txt = (
                 f"📊 *RELATÓRIO 2H*\n\n"
-                f"💰 Trades: `{st['trades']}`\n"
-                f"📈 Alertas: `{st['alerts']}`\n"
-                f"💎 Tokens monitorados: `{tokens_count}`\n\n"
-                f"🔍 Monitorando tokens em alta\n"
-                f"🛡️ Filtros ativos\n"
-                f"💰 Entrada: `{TRADE_AMOUNT_SOL} SOL`"
+                f"🐋 Traders monitorados: `{traders}`\n"
+                f"📈 Alertas enviados: `{alerts}`\n\n"
+                f"✅ GMGN API conectada\n"
+                f"🔍 Monitorando compras dos top traders"
             )
             send(txt)
         except Exception as e:
@@ -364,33 +270,30 @@ def relatorio():
 @app.route("/")
 def health():
     with lock:
-        tokens_count = len(top_tokens)
-    return f"WHALE HUNTER v13.1 | tokens={tokens_count} | trades={stats['trades']} | alerts={stats['alerts']}"
-
-@app.route("/tokens")
-def get_tokens():
-    with lock:
-        return {"top_tokens": top_tokens[:10]}
+        traders = len(top_traders)
+    return f"GMGN BOT | traders={traders} | alerts={stats['alerts']}"
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v13.1 (FILTROS AJUSTADOS) ===")
+    print("=== INICIANDO WHALE HUNTER v17.0 (GMGN API) ===")
     
-    find_top_tokens()
+    if not GMGN_API_KEY or not GMGN_PRIVATE_KEY:
+        send("⚠️ *ERRO: Variáveis GMGN_API_KEY e GMGN_PRIVATE_KEY não configuradas!*")
+        print("ERRO: Variáveis GMGN_API_KEY e GMGN_PRIVATE_KEY não configuradas!")
+    else:
+        send("🟢 *WHALE HUNTER v17.0 ONLINE*\n\n"
+             "🐋 *GMGN API CONECTADA*\n"
+             "🔍 Monitorando top traders em tempo real\n"
+             "📝 Alertas quando eles compram\n\n"
+             "⚠️ *MODO MANUAL* - Você decide se compra ou vende")
+        
+        identify_top_traders()
     
-    send("🟢 *WHALE HUNTER v13.1 ONLINE*\n\n"
-         "🔍 *Modo: DexScreener + Birdeye*\n"
-         "🔄 Tokens atualizados a cada 10min\n"
-         f"💰 Entrada: `{TRADE_AMOUNT_SOL} SOL`\n"
-         "🛡️ Filtros ajustados para capturar mais tokens\n\n"
-         "✅ *Monitorando tokens em alta*\n"
-         "📊 Enviando alertas de tokens promissores")
-
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()
-    threading.Thread(target=monitor_tokens, daemon=True).start()
+    threading.Thread(target=monitor_traders, daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
     print(f"=== BOT RODANDO na porta {port} ===")

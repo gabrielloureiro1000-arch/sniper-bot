@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v19.0 - COM GMGN CLI OFICIAL
+# WHALE HUNTER v19.1 - GMGN CLI (CORRIGIDO)
 # ============================================================
 import os
 import time
@@ -35,11 +35,11 @@ app = Flask(__name__)
 SCAN_DELAY = 30
 REPORT_INTERVAL = 7200  # 2 horas
 
-# Filtros
-MIN_VOLUME = 5000
-MIN_BUYS = 5
-MIN_RATIO = 1.2
-MIN_PRICE_CHANGE = 0.5
+# Filtros (mais flexíveis para começar a receber alertas)
+MIN_VOLUME = 1000  # Reduzido de 5000
+MIN_BUYS = 3       # Reduzido de 5
+MIN_RATIO = 1.0    # Reduzido
+MIN_PRICE_CHANGE = 0.3  # Reduzido de 0.5
 MAX_AGE = 120
 
 # ============================================================
@@ -90,7 +90,7 @@ def gmgn_cli_command(cmd):
         )
         
         if result.returncode != 0:
-            print(f"[CLI] Erro: {result.stderr}")
+            print(f"[CLI] Erro: {result.stderr[:200]}")
             return None
         
         if not result.stdout.strip():
@@ -104,6 +104,7 @@ def gmgn_cli_command(cmd):
         return None
     except json.JSONDecodeError as e:
         print(f"[CLI] JSON inválido: {e}")
+        print(f"[CLI] Resposta: {result.stdout[:200] if result else 'N/A'}")
         return None
     except Exception as e:
         print(f"[CLI] Exceção: {e}")
@@ -179,7 +180,7 @@ def get_token_traders(chain, address):
     return []
 
 # ============================================================
-# ANÁLISE DO TOKEN
+# ANÁLISE DO TOKEN (CORRIGIDA)
 # ============================================================
 def analyze_tokens(tokens, source="trending"):
     """Analisa os tokens encontrados e envia alertas"""
@@ -187,8 +188,20 @@ def analyze_tokens(tokens, source="trending"):
     
     for token in tokens:
         try:
+            # DEBUG: Mostra o tipo e estrutura do token
+            if isinstance(token, str):
+                try:
+                    token = json.loads(token)
+                except:
+                    print(f"[DEBUG] Não foi possível converter string para JSON")
+                    continue
+            
+            if not isinstance(token, dict):
+                print(f"[DEBUG] Token não é dicionário: {type(token)}")
+                continue
+            
             # Extrai dados do token
-            address = token.get('address')
+            address = token.get('address') or token.get('token_address') or token.get('id')
             if not address:
                 continue
             
@@ -198,12 +211,12 @@ def analyze_tokens(tokens, source="trending"):
                     continue
             
             symbol = token.get('symbol', '???')
-            price = token.get('price', 0)
-            volume_24h = token.get('volume_24h', 0)
-            market_cap = token.get('market_cap', 0)
-            price_change_1h = token.get('price_change_1h', 0)
-            holder_count = token.get('holder_count', 0)
-            smart_money_count = token.get('smart_degen_count', 0)
+            price = float(token.get('price', 0) or 0)
+            volume_24h = float(token.get('volume_24h', 0) or token.get('volume', 0) or 0)
+            market_cap = float(token.get('market_cap', 0) or 0)
+            price_change_1h = float(token.get('price_change_1h', 0) or token.get('price_change', {}).get('1h', 0) or 0)
+            holder_count = int(token.get('holder_count', 0) or token.get('holders', 0) or 0)
+            smart_money_count = int(token.get('smart_degen_count', 0) or token.get('smart_money', 0) or 0)
             
             # Filtros básicos
             if volume_24h < MIN_VOLUME:
@@ -219,9 +232,9 @@ def analyze_tokens(tokens, source="trending"):
             token_details = get_token_info('sol', address)
             if token_details:
                 symbol = token_details.get('symbol', symbol)
-                price = token_details.get('price', price)
-                holder_count = token_details.get('holder_count', holder_count)
-                smart_money_count = token_details.get('smart_degen_count', smart_money_count)
+                price = float(token_details.get('price', price) or 0)
+                holder_count = int(token_details.get('holder_count', holder_count) or 0)
+                smart_money_count = int(token_details.get('smart_degen_count', smart_money_count) or 0)
             
             # Busca top traders (se disponível)
             top_traders = get_token_traders('sol', address)
@@ -230,15 +243,19 @@ def analyze_tokens(tokens, source="trending"):
             score = 0
             if price_change_1h > 10: score += 20
             elif price_change_1h > 5: score += 10
+            elif price_change_1h > 2: score += 5
             if holder_count > 100: score += 20
             elif holder_count > 50: score += 10
+            elif holder_count > 20: score += 5
             if smart_money_count > 5: score += 30
             elif smart_money_count > 2: score += 15
+            elif smart_money_count > 0: score += 5
             if market_cap > 100000: score += 20
             elif market_cap > 50000: score += 10
+            elif market_cap > 20000: score += 5
             
             # Só alerta se score for bom
-            if score < 30:
+            if score < 25:
                 continue
             
             # Marca como alertado
@@ -293,6 +310,7 @@ def analyze_tokens(tokens, source="trending"):
             
         except Exception as e:
             print(f"[ANALYZE] Erro: {e}")
+            print(f"[DEBUG] Token: {str(token)[:200] if token else 'None'}")
 
 # ============================================================
 # MONITORAR TOKENS
@@ -362,7 +380,7 @@ def health():
     with lock:
         alerts = stats["alerts"]
         tokens = stats["tokens_found"]
-    return f"WHALE HUNTER v19.0 | alerts={alerts} | tokens={tokens}"
+    return f"WHALE HUNTER v19.1 | alerts={alerts} | tokens={tokens}"
 
 @app.route("/test")
 def test_cli():
@@ -380,7 +398,7 @@ def test_cli():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v19.0 (GMGN CLI) ===")
+    print("=== INICIANDO WHALE HUNTER v19.1 (GMGN CLI CORRIGIDO) ===")
     print(f"[INFO] IPv4 forçado: {allowed_gateways()}")
     
     # Testa o GMGN CLI
@@ -391,7 +409,7 @@ if __name__ == "__main__":
     else:
         print("[TESTE] ⚠️ GMGN CLI não retornou dados - verifique a instalação")
     
-    send("🟢 *WHALE HUNTER v19.0 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v19.1 ONLINE*\n\n"
          "🐋 *GMGN CLI CONECTADO*\n"
          "🔍 Monitorando tokens em tempo real\n"
          "📝 Alertas completos para análise\n\n"

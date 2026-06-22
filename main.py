@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v19.7 - CORRIGE PARSER DO DATA
+# WHALE HUNTER v19.8 - FILTROS REDUZIDOS
 # ============================================================
 import os
 import time
@@ -31,9 +31,11 @@ app = Flask(__name__)
 
 SCAN_DELAY = 30
 REPORT_INTERVAL = 7200
-MIN_VOLUME = 1000
-MIN_BUYS = 3
-MIN_PRICE_CHANGE = 0.3
+
+# FILTROS REDUZIDOS - PARA TESTE
+MIN_VOLUME = 100      # Volume mínimo em USD
+MIN_BUYS = 1          # Número mínimo de compradores
+MIN_PRICE_CHANGE = 0.0  # Alta mínima em %
 
 # ============================================================
 # ESTADO GLOBAL
@@ -115,30 +117,16 @@ def get_trending_tokens(chain="sol", interval="1h", limit=20):
     ]
     result = gmgn_cli_command(cmd)
     
-    # Verifica se a resposta é um dict com 'data'
     if result and isinstance(result, dict):
-        print(f"[DEBUG] Chaves da resposta: {list(result.keys())}")
-        
-        # Se tem 'data' e é uma lista, retorna ela
         if 'data' in result:
             data = result['data']
-            print(f"[DEBUG] data é do tipo: {type(data)}")
             if isinstance(data, list):
                 return data
             elif isinstance(data, dict):
-                # Se 'data' for um dict, tenta extrair a lista
                 for key, value in data.items():
                     if isinstance(value, list):
-                        print(f"[DEBUG] Usando data['{key}'] como lista")
                         return value
-                # Se não encontrar lista, retorna o dict como lista de um elemento
                 return [data]
-        
-        # Tenta outras chaves comuns
-        for key in ['tokens', 'items', 'results']:
-            if key in result and isinstance(result[key], list):
-                return result[key]
-    
     return []
 
 def get_trenches_tokens(chain="sol", limit=20):
@@ -196,43 +184,11 @@ def analyze_tokens(tokens, source="trending"):
     """Analisa os tokens encontrados e envia alertas"""
     global stats
     
-    print(f"[DEBUG] Tokens recebidos: {len(tokens)} - Tipo: {type(tokens)}")
-    if tokens:
-        print(f"[DEBUG] Primeiro token: {str(tokens[0])[:300]}")
+    print(f"[DEBUG] Analisando {len(tokens)} tokens de {source}")
     
-    valid_tokens = []
     for token in tokens:
-        if isinstance(token, str):
-            if token == "rank":
-                continue
-            try:
-                token = json.loads(token)
-            except:
-                continue
-        
-        if isinstance(token, dict):
-            address = token.get('address') or token.get('token_address') or token.get('id')
-            if address:
-                valid_tokens.append(token)
-                continue
-            
-            for key in ['token', 'data', 'info']:
-                if key in token and isinstance(token[key], dict):
-                    inner = token[key]
-                    address = inner.get('address') or inner.get('token_address') or inner.get('id')
-                    if address:
-                        token['address'] = address
-                        valid_tokens.append(token)
-                        break
-    
-    if not valid_tokens:
-        print(f"[DEBUG] Nenhum token válido encontrado em {source}")
-        return
-    
-    print(f"[DEBUG] Analisando {len(valid_tokens)} tokens válidos de {source}")
-    
-    for token in valid_tokens:
         try:
+            # Extrai dados
             address = token.get('address') or token.get('token_address') or token.get('id')
             if not address:
                 continue
@@ -245,10 +201,11 @@ def analyze_tokens(tokens, source="trending"):
             price = float(token.get('price', 0) or 0)
             volume_24h = float(token.get('volume_24h', 0) or token.get('volume', 0) or 0)
             market_cap = float(token.get('market_cap', 0) or 0)
-            price_change_1h = float(token.get('price_change_1h', 0) or token.get('price_change', {}).get('1h', 0) or 0)
+            price_change_1h = float(token.get('price_change_1h', 0) or token.get('price_change_percent', 0) or 0)
             holder_count = int(token.get('holder_count', 0) or token.get('holders', 0) or 0)
             smart_money_count = int(token.get('smart_degen_count', 0) or token.get('smart_money', 0) or 0)
             
+            # Filtros
             if volume_24h < MIN_VOLUME:
                 continue
             if holder_count < MIN_BUYS:
@@ -271,7 +228,7 @@ def analyze_tokens(tokens, source="trending"):
             elif market_cap > 50000: score += 10
             elif market_cap > 20000: score += 5
             
-            if score < 25:
+            if score < 10:  # Score mínimo mais baixo para testar
                 continue
             
             with lock:
@@ -283,6 +240,8 @@ def analyze_tokens(tokens, source="trending"):
                 confidence = "🟢 FORTE"
             elif score >= 50:
                 confidence = "🟡 MÉDIO"
+            elif score >= 25:
+                confidence = "🟠 INTERESSANTE"
             
             tp1 = price * 1.8
             tp2 = price * 3.5
@@ -328,16 +287,12 @@ def monitor_tokens():
             if trending:
                 print(f"[MONITOR] Encontrados {len(trending)} tokens em alta")
                 analyze_tokens(trending, "trending")
-            else:
-                print("[MONITOR] Nenhum token em alta encontrado")
             
             print("[MONITOR] Buscando novos tokens...")
             trenches = get_trenches_tokens(limit=10)
             if trenches:
                 print(f"[MONITOR] Encontrados {len(trenches)} novos tokens")
                 analyze_tokens(trenches, "trenches")
-            else:
-                print("[MONITOR] Nenhum novo token encontrado")
             
             time.sleep(SCAN_DELAY)
             
@@ -375,33 +330,32 @@ def health():
     with lock:
         alerts = stats["alerts"]
         tokens = stats["tokens_found"]
-    return f"WHALE HUNTER v19.7 | alerts={alerts} | tokens={tokens}"
+    return f"WHALE HUNTER v19.8 | alerts={alerts} | tokens={tokens}"
 
 @app.route("/debug")
 def debug_output():
-    """Endpoint para visualizar a saída do CLI"""
     try:
         with open("/tmp/cli_output.txt", "r") as f:
             content = f.read()
         return f"<pre>{content}</pre>"
     except FileNotFoundError:
-        return "Arquivo /tmp/cli_output.txt não encontrado"
+        return "Arquivo não encontrado"
     except Exception as e:
-        return f"Erro ao ler arquivo: {e}"
+        return f"Erro: {e}"
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v19.7 (PARSER CORRIGIDO) ===")
+    print("=== INICIANDO WHALE HUNTER v19.8 (FILTROS REDUZIDOS) ===")
     
     test_result = get_trending_tokens(limit=1)
     if test_result:
         print(f"[TESTE] ✅ GMGN CLI funcionando! Retornou {len(test_result)} tokens")
     else:
-        print("[TESTE] ⚠️ GMGN CLI não retornou dados - verifique o debug")
+        print("[TESTE] ⚠️ GMGN CLI não retornou dados")
     
-    send("🟢 *WHALE HUNTER v19.7 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v19.8 ONLINE*\n\n"
          "🐋 *GMGN CLI CONECTADO*\n"
          "🔍 Monitorando tokens em tempo real\n"
          "📝 Alertas completos para análise\n\n"

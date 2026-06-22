@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v19.4 - COM ENDPOINT DE DEBUG
+# WHALE HUNTER v19.5 - IGNORA CABEÇALHO "rank"
 # ============================================================
 import os
 import time
@@ -29,9 +29,6 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
 app = Flask(__name__)
 
-# ============================================================
-# CONFIGURAÇÕES
-# ============================================================
 SCAN_DELAY = 30
 REPORT_INTERVAL = 7200
 MIN_VOLUME = 1000
@@ -84,10 +81,6 @@ def gmgn_cli_command(cmd):
             timeout=30,
             env={**os.environ, "NODE_OPTIONS": "--dns-result-order=ipv4first"}
         )
-        
-        # SALVA A SAÍDA BRUTA PARA DEBUG
-        with open("/tmp/cli_output.txt", "w") as f:
-            f.write(f"=== STDOUT ===\n{result.stdout}\n\n=== STDERR ===\n{result.stderr}\n\n=== RETURN CODE ===\n{result.returncode}")
         
         if result.returncode != 0:
             print(f"[CLI] Erro (cod {result.returncode}): {result.stderr[:200]}")
@@ -167,27 +160,33 @@ def get_token_traders(chain, address):
     return []
 
 # ============================================================
-# ANÁLISE DO TOKEN
+# ANÁLISE DO TOKEN (CORRIGIDA)
 # ============================================================
 def analyze_tokens(tokens, source="trending"):
     """Analisa os tokens encontrados e envia alertas"""
     global stats
     
-    print(f"[DEBUG] Analisando {len(tokens)} tokens de {source}")
-    
+    # Filtra tokens válidos (ignora cabeçalhos como "rank")
+    valid_tokens = []
     for token in tokens:
-        try:
-            if isinstance(token, str):
-                try:
-                    token = json.loads(token)
-                except:
-                    print(f"[DEBUG] Token é string: {token[:100]}")
-                    continue
-            
-            if not isinstance(token, dict):
-                print(f"[DEBUG] Token não é dict: {type(token)}")
+        if isinstance(token, str) and token == "rank":
+            continue
+        if isinstance(token, str):
+            try:
+                token = json.loads(token)
+            except:
                 continue
-            
+        if isinstance(token, dict) and token.get('address'):
+            valid_tokens.append(token)
+    
+    if not valid_tokens:
+        print(f"[DEBUG] Nenhum token válido encontrado em {source}")
+        return
+    
+    print(f"[DEBUG] Analisando {len(valid_tokens)} tokens válidos de {source}")
+    
+    for token in valid_tokens:
+        try:
             address = token.get('address') or token.get('token_address') or token.get('id')
             if not address:
                 continue
@@ -330,11 +329,8 @@ def health():
     with lock:
         alerts = stats["alerts"]
         tokens = stats["tokens_found"]
-    return f"WHALE HUNTER v19.4 | alerts={alerts} | tokens={tokens}"
+    return f"WHALE HUNTER v19.5 | alerts={alerts} | tokens={tokens}"
 
-# ============================================================
-# ENDPOINT DE DEBUG
-# ============================================================
 @app.route("/debug")
 def debug_output():
     """Endpoint para visualizar a saída do CLI"""
@@ -351,7 +347,7 @@ def debug_output():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v19.4 (DEBUG) ===")
+    print("=== INICIANDO WHALE HUNTER v19.5 (IGNORA 'rank') ===")
     
     test_result = get_trending_tokens(limit=1)
     if test_result:
@@ -359,12 +355,11 @@ if __name__ == "__main__":
     else:
         print("[TESTE] ⚠️ GMGN CLI não retornou dados")
     
-    send("🟢 *WHALE HUNTER v19.4 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v19.5 ONLINE*\n\n"
          "🐋 *GMGN CLI CONECTADO*\n"
          "🔍 Monitorando tokens em tempo real\n"
          "📝 Alertas completos para análise\n\n"
-         "⚠️ *MODO MANUAL* - Você decide se compra ou vende\n\n"
-         "🔧 *Debug:* https://sniper-bot-2-eouj.onrender.com/debug")
+         "⚠️ *MODO MANUAL* - Você decide se compra ou vende")
     
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()

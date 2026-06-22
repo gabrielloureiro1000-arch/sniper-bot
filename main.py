@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v19.5 - IGNORA CABEÇALHO "rank"
+# WHALE HUNTER v19.6 - PARSER ROBUSTO
 # ============================================================
 import os
 import time
@@ -114,8 +114,23 @@ def get_trending_tokens(chain="sol", interval="1h", limit=20):
         '--raw'
     ]
     result = gmgn_cli_command(cmd)
-    if result and 'data' in result:
-        return result['data']
+    
+    if result:
+        print(f"[DEBUG] Tipo de resposta: {type(result)}")
+        print(f"[DEBUG] Chaves: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+        
+        if isinstance(result, dict) and 'data' in result:
+            return result['data']
+        if isinstance(result, dict) and 'tokens' in result:
+            return result['tokens']
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            for key, value in result.items():
+                if isinstance(value, list):
+                    print(f"[DEBUG] Usando chave '{key}' como lista de tokens")
+                    return value
+    
     return []
 
 def get_trenches_tokens(chain="sol", limit=20):
@@ -160,24 +175,40 @@ def get_token_traders(chain, address):
     return []
 
 # ============================================================
-# ANÁLISE DO TOKEN (CORRIGIDA)
+# ANÁLISE DO TOKEN
 # ============================================================
 def analyze_tokens(tokens, source="trending"):
     """Analisa os tokens encontrados e envia alertas"""
     global stats
     
-    # Filtra tokens válidos (ignora cabeçalhos como "rank")
+    print(f"[DEBUG] Tokens recebidos: {len(tokens)} - Tipo: {type(tokens)}")
+    if tokens:
+        print(f"[DEBUG] Primeiro token: {str(tokens[0])[:300]}")
+    
     valid_tokens = []
     for token in tokens:
-        if isinstance(token, str) and token == "rank":
-            continue
         if isinstance(token, str):
+            if token == "rank":
+                continue
             try:
                 token = json.loads(token)
             except:
                 continue
-        if isinstance(token, dict) and token.get('address'):
-            valid_tokens.append(token)
+        
+        if isinstance(token, dict):
+            address = token.get('address') or token.get('token_address') or token.get('id')
+            if address:
+                valid_tokens.append(token)
+                continue
+            
+            for key in ['token', 'data', 'info']:
+                if key in token and isinstance(token[key], dict):
+                    inner = token[key]
+                    address = inner.get('address') or inner.get('token_address') or inner.get('id')
+                    if address:
+                        token['address'] = address
+                        valid_tokens.append(token)
+                        break
     
     if not valid_tokens:
         print(f"[DEBUG] Nenhum token válido encontrado em {source}")
@@ -210,7 +241,6 @@ def analyze_tokens(tokens, source="trending"):
             if price_change_1h < MIN_PRICE_CHANGE:
                 continue
             
-            # Score
             score = 0
             if price_change_1h > 10: score += 20
             elif price_change_1h > 5: score += 10
@@ -329,7 +359,7 @@ def health():
     with lock:
         alerts = stats["alerts"]
         tokens = stats["tokens_found"]
-    return f"WHALE HUNTER v19.5 | alerts={alerts} | tokens={tokens}"
+    return f"WHALE HUNTER v19.6 | alerts={alerts} | tokens={tokens}"
 
 @app.route("/debug")
 def debug_output():
@@ -347,19 +377,20 @@ def debug_output():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v19.5 (IGNORA 'rank') ===")
+    print("=== INICIANDO WHALE HUNTER v19.6 (PARSER ROBUSTO) ===")
     
     test_result = get_trending_tokens(limit=1)
     if test_result:
         print(f"[TESTE] ✅ GMGN CLI funcionando! Retornou {len(test_result)} tokens")
     else:
-        print("[TESTE] ⚠️ GMGN CLI não retornou dados")
+        print("[TESTE] ⚠️ GMGN CLI não retornou dados - verifique o debug")
     
-    send("🟢 *WHALE HUNTER v19.5 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v19.6 ONLINE*\n\n"
          "🐋 *GMGN CLI CONECTADO*\n"
          "🔍 Monitorando tokens em tempo real\n"
          "📝 Alertas completos para análise\n\n"
-         "⚠️ *MODO MANUAL* - Você decide se compra ou vende")
+         "⚠️ *MODO MANUAL* - Você decide se compra ou vende\n\n"
+         "🔧 *Debug:* https://sniper-bot-2-eouj.onrender.com/debug")
     
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()

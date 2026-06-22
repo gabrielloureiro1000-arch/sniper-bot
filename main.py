@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v19.3 - GMGN CLI COM DEBUG
+# WHALE HUNTER v19.4 - COM ENDPOINT DE DEBUG
 # ============================================================
 import os
 import time
@@ -30,7 +30,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 app = Flask(__name__)
 
 # ============================================================
-# CONFIGURAÇÕES DE MONITORAMENTO
+# CONFIGURAÇÕES
 # ============================================================
 SCAN_DELAY = 30
 REPORT_INTERVAL = 7200
@@ -88,7 +88,6 @@ def gmgn_cli_command(cmd):
         # SALVA A SAÍDA BRUTA PARA DEBUG
         with open("/tmp/cli_output.txt", "w") as f:
             f.write(f"=== STDOUT ===\n{result.stdout}\n\n=== STDERR ===\n{result.stderr}\n\n=== RETURN CODE ===\n{result.returncode}")
-        print("[DEBUG] Saída salva em /tmp/cli_output.txt")
         
         if result.returncode != 0:
             print(f"[CLI] Erro (cod {result.returncode}): {result.stderr[:200]}")
@@ -98,14 +97,11 @@ def gmgn_cli_command(cmd):
             print("[CLI] Resposta vazia")
             return None
         
-        # Tenta fazer o parse do JSON
         try:
             data = json.loads(result.stdout)
             return data
         except json.JSONDecodeError as e:
             print(f"[CLI] JSON inválido: {e}")
-            print(f"[CLI] Primeiros 500 caracteres da resposta:")
-            print(result.stdout[:500])
             return None
         
     except subprocess.TimeoutExpired:
@@ -127,9 +123,6 @@ def get_trending_tokens(chain="sol", interval="1h", limit=20):
     result = gmgn_cli_command(cmd)
     if result and 'data' in result:
         return result['data']
-    elif result:
-        print(f"[CLI] Resposta sem 'data': {list(result.keys()) if result else 'None'}")
-        return []
     return []
 
 def get_trenches_tokens(chain="sol", limit=20):
@@ -188,24 +181,16 @@ def analyze_tokens(tokens, source="trending"):
                 try:
                     token = json.loads(token)
                 except:
-                    print(f"[DEBUG] Token é string mas não JSON: {token[:100]}")
+                    print(f"[DEBUG] Token é string: {token[:100]}")
                     continue
             
             if not isinstance(token, dict):
                 print(f"[DEBUG] Token não é dict: {type(token)}")
-                if isinstance(token, list) and token:
-                    token = token[0]
-                    if not isinstance(token, dict):
-                        continue
-                else:
-                    continue
+                continue
             
             address = token.get('address') or token.get('token_address') or token.get('id')
             if not address:
-                if 'token' in token and isinstance(token['token'], dict):
-                    address = token['token'].get('address')
-                if not address:
-                    continue
+                continue
             
             with lock:
                 if address in tracked_tokens:
@@ -226,13 +211,7 @@ def analyze_tokens(tokens, source="trending"):
             if price_change_1h < MIN_PRICE_CHANGE:
                 continue
             
-            token_details = get_token_info('sol', address)
-            if token_details:
-                symbol = token_details.get('symbol', symbol)
-                price = float(token_details.get('price', price) or 0)
-                holder_count = int(token_details.get('holder_count', holder_count) or 0)
-                smart_money_count = int(token_details.get('smart_degen_count', smart_money_count) or 0)
-            
+            # Score
             score = 0
             if price_change_1h > 10: score += 20
             elif price_change_1h > 5: score += 10
@@ -265,15 +244,6 @@ def analyze_tokens(tokens, source="trending"):
             tp3 = price * 7.0
             stop = price * 0.85
             
-            top_traders = get_token_traders('sol', address)
-            traders_msg = ""
-            if top_traders and len(top_traders) > 0:
-                traders_msg = f"\n🐋 *Top Traders:*\n"
-                for i, t in enumerate(top_traders[:3], 1):
-                    addr = t.get('address', 'N/A')[:8]
-                    profit = t.get('profit', 0)
-                    traders_msg += f"  {i}. `{addr}...` - Lucro: `${profit:,.0f}`\n"
-            
             msg = (
                 f"{confidence} *TOKEN PROMISSOR DETECTADO*\n"
                 f"Fonte: {source.upper()}\n\n"
@@ -285,8 +255,7 @@ def analyze_tokens(tokens, source="trending"):
                 f"📈 Alta 1h: `{price_change_1h:+.1f}%`\n"
                 f"👥 Holders: `{holder_count}`\n"
                 f"🧠 Smart Money: `{smart_money_count}`\n"
-                f"⭐ Score: `{score:.0f}`\n"
-                f"{traders_msg}\n"
+                f"⭐ Score: `{score:.0f}`\n\n"
                 f"🎯 TP1: `1.8x` | TP2: `3.5x` | TP3: `7x`\n"
                 f"🛑 STOP: `-15%`\n\n"
                 f"🔍 GMGN: https://gmgn.ai/sol/token/{address}\n"
@@ -300,7 +269,6 @@ def analyze_tokens(tokens, source="trending"):
             
         except Exception as e:
             print(f"[ANALYZE] Erro: {e}")
-            print(f"[DEBUG] Token: {str(token)[:200] if token else 'None'}")
 
 # ============================================================
 # MONITORAR TOKENS
@@ -347,8 +315,7 @@ def relatorio():
                 f"📊 *RELATÓRIO 2H*\n\n"
                 f"📈 Alertas enviados: `{alerts}`\n"
                 f"💎 Tokens analisados: `{tokens}`\n\n"
-                f"🔍 Monitorando tokens em alta e novos\n"
-                f"✅ *MODO MANUAL* - Você decide as entradas"
+                f"🔍 Monitorando tokens em alta e novos"
             )
             send(txt)
         except Exception as e:
@@ -363,25 +330,41 @@ def health():
     with lock:
         alerts = stats["alerts"]
         tokens = stats["tokens_found"]
-    return f"WHALE HUNTER v19.3 | alerts={alerts} | tokens={tokens}"
+    return f"WHALE HUNTER v19.4 | alerts={alerts} | tokens={tokens}"
+
+# ============================================================
+# ENDPOINT DE DEBUG
+# ============================================================
+@app.route("/debug")
+def debug_output():
+    """Endpoint para visualizar a saída do CLI"""
+    try:
+        with open("/tmp/cli_output.txt", "r") as f:
+            content = f.read()
+        return f"<pre>{content}</pre>"
+    except FileNotFoundError:
+        return "Arquivo /tmp/cli_output.txt não encontrado"
+    except Exception as e:
+        return f"Erro ao ler arquivo: {e}"
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v19.3 (GMGN CLI DEBUG) ===")
+    print("=== INICIANDO WHALE HUNTER v19.4 (DEBUG) ===")
     
     test_result = get_trending_tokens(limit=1)
     if test_result:
         print(f"[TESTE] ✅ GMGN CLI funcionando! Retornou {len(test_result)} tokens")
     else:
-        print("[TESTE] ⚠️ GMGN CLI não retornou dados - verifique o arquivo /tmp/cli_output.txt")
+        print("[TESTE] ⚠️ GMGN CLI não retornou dados")
     
-    send("🟢 *WHALE HUNTER v19.3 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v19.4 ONLINE*\n\n"
          "🐋 *GMGN CLI CONECTADO*\n"
          "🔍 Monitorando tokens em tempo real\n"
          "📝 Alertas completos para análise\n\n"
-         "⚠️ *MODO MANUAL* - Você decide se compra ou vende")
+         "⚠️ *MODO MANUAL* - Você decide se compra ou vende\n\n"
+         "🔧 *Debug:* https://sniper-bot-2-eouj.onrender.com/debug")
     
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()

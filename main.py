@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v19.2 - GMGN CLI (COM DEBUG)
+# WHALE HUNTER v19.3 - GMGN CLI COM DEBUG
 # ============================================================
 import os
 import time
@@ -34,8 +34,6 @@ app = Flask(__name__)
 # ============================================================
 SCAN_DELAY = 30
 REPORT_INTERVAL = 7200
-
-# Filtros (mais flexíveis)
 MIN_VOLUME = 1000
 MIN_BUYS = 3
 MIN_PRICE_CHANGE = 0.3
@@ -87,6 +85,11 @@ def gmgn_cli_command(cmd):
             env={**os.environ, "NODE_OPTIONS": "--dns-result-order=ipv4first"}
         )
         
+        # SALVA A SAÍDA BRUTA PARA DEBUG
+        with open("/tmp/cli_output.txt", "w") as f:
+            f.write(f"=== STDOUT ===\n{result.stdout}\n\n=== STDERR ===\n{result.stderr}\n\n=== RETURN CODE ===\n{result.returncode}")
+        print("[DEBUG] Saída salva em /tmp/cli_output.txt")
+        
         if result.returncode != 0:
             print(f"[CLI] Erro (cod {result.returncode}): {result.stderr[:200]}")
             return None
@@ -94,7 +97,7 @@ def gmgn_cli_command(cmd):
         if not result.stdout.strip():
             print("[CLI] Resposta vazia")
             return None
-            
+        
         # Tenta fazer o parse do JSON
         try:
             data = json.loads(result.stdout)
@@ -125,11 +128,7 @@ def get_trending_tokens(chain="sol", interval="1h", limit=20):
     if result and 'data' in result:
         return result['data']
     elif result:
-        # Se não tiver 'data', pode ser um formato diferente
         print(f"[CLI] Resposta sem 'data': {list(result.keys()) if result else 'None'}")
-        # Tenta retornar o próprio resultado se for uma lista
-        if isinstance(result, list):
-            return result
         return []
     return []
 
@@ -185,7 +184,6 @@ def analyze_tokens(tokens, source="trending"):
     
     for token in tokens:
         try:
-            # Se for string, tenta converter
             if isinstance(token, str):
                 try:
                     token = json.loads(token)
@@ -193,10 +191,8 @@ def analyze_tokens(tokens, source="trending"):
                     print(f"[DEBUG] Token é string mas não JSON: {token[:100]}")
                     continue
             
-            # Se não for dict, tenta extrair
             if not isinstance(token, dict):
                 print(f"[DEBUG] Token não é dict: {type(token)}")
-                # Se for lista, pega o primeiro elemento
                 if isinstance(token, list) and token:
                     token = token[0]
                     if not isinstance(token, dict):
@@ -204,21 +200,17 @@ def analyze_tokens(tokens, source="trending"):
                 else:
                     continue
             
-            # Extrai dados
             address = token.get('address') or token.get('token_address') or token.get('id')
             if not address:
-                # Tenta buscar em campos aninhados
                 if 'token' in token and isinstance(token['token'], dict):
                     address = token['token'].get('address')
                 if not address:
                     continue
             
-            # Verifica duplicado
             with lock:
                 if address in tracked_tokens:
                     continue
             
-            # Extrai métricas
             symbol = token.get('symbol', '???')
             price = float(token.get('price', 0) or 0)
             volume_24h = float(token.get('volume_24h', 0) or token.get('volume', 0) or 0)
@@ -227,7 +219,6 @@ def analyze_tokens(tokens, source="trending"):
             holder_count = int(token.get('holder_count', 0) or token.get('holders', 0) or 0)
             smart_money_count = int(token.get('smart_degen_count', 0) or token.get('smart_money', 0) or 0)
             
-            # Filtros
             if volume_24h < MIN_VOLUME:
                 continue
             if holder_count < MIN_BUYS:
@@ -235,7 +226,6 @@ def analyze_tokens(tokens, source="trending"):
             if price_change_1h < MIN_PRICE_CHANGE:
                 continue
             
-            # Busca mais detalhes (opcional)
             token_details = get_token_info('sol', address)
             if token_details:
                 symbol = token_details.get('symbol', symbol)
@@ -243,7 +233,6 @@ def analyze_tokens(tokens, source="trending"):
                 holder_count = int(token_details.get('holder_count', holder_count) or 0)
                 smart_money_count = int(token_details.get('smart_degen_count', smart_money_count) or 0)
             
-            # Score
             score = 0
             if price_change_1h > 10: score += 20
             elif price_change_1h > 5: score += 10
@@ -261,12 +250,10 @@ def analyze_tokens(tokens, source="trending"):
             if score < 25:
                 continue
             
-            # Registra
             with lock:
                 tracked_tokens[address] = time.time()
                 stats["tokens_found"] += 1
             
-            # Monta mensagem
             confidence = "🔴"
             if score >= 70:
                 confidence = "🟢 FORTE"
@@ -278,7 +265,6 @@ def analyze_tokens(tokens, source="trending"):
             tp3 = price * 7.0
             stop = price * 0.85
             
-            # Busca traders
             top_traders = get_token_traders('sol', address)
             traders_msg = ""
             if top_traders and len(top_traders) > 0:
@@ -377,23 +363,21 @@ def health():
     with lock:
         alerts = stats["alerts"]
         tokens = stats["tokens_found"]
-    return f"WHALE HUNTER v19.2 | alerts={alerts} | tokens={tokens}"
+    return f"WHALE HUNTER v19.3 | alerts={alerts} | tokens={tokens}"
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v19.2 (GMGN CLI DEBUG) ===")
+    print("=== INICIANDO WHALE HUNTER v19.3 (GMGN CLI DEBUG) ===")
     
-    # Testa o CLI
-    print("[TESTE] Verificando GMGN CLI...")
     test_result = get_trending_tokens(limit=1)
     if test_result:
         print(f"[TESTE] ✅ GMGN CLI funcionando! Retornou {len(test_result)} tokens")
     else:
-        print("[TESTE] ⚠️ GMGN CLI não retornou dados")
+        print("[TESTE] ⚠️ GMGN CLI não retornou dados - verifique o arquivo /tmp/cli_output.txt")
     
-    send("🟢 *WHALE HUNTER v19.2 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v19.3 ONLINE*\n\n"
          "🐋 *GMGN CLI CONECTADO*\n"
          "🔍 Monitorando tokens em tempo real\n"
          "📝 Alertas completos para análise\n\n"

@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v19.1 - GMGN CLI (CORRIGIDO)
+# WHALE HUNTER v19.2 - GMGN CLI (COM DEBUG)
 # ============================================================
 import os
 import time
@@ -14,7 +14,7 @@ import socket
 import requests.packages.urllib3.util.connection as urllib3_cn
 
 # ============================================================
-# FORÇAR IPv4 (RESOLVE O ERRO DE DNS)
+# FORÇAR IPv4
 # ============================================================
 def allowed_gateways():
     return (socket.AF_INET,)
@@ -33,14 +33,12 @@ app = Flask(__name__)
 # CONFIGURAÇÕES DE MONITORAMENTO
 # ============================================================
 SCAN_DELAY = 30
-REPORT_INTERVAL = 7200  # 2 horas
+REPORT_INTERVAL = 7200
 
-# Filtros (mais flexíveis para começar a receber alertas)
-MIN_VOLUME = 1000  # Reduzido de 5000
-MIN_BUYS = 3       # Reduzido de 5
-MIN_RATIO = 1.0    # Reduzido
-MIN_PRICE_CHANGE = 0.3  # Reduzido de 0.5
-MAX_AGE = 120
+# Filtros (mais flexíveis)
+MIN_VOLUME = 1000
+MIN_BUYS = 3
+MIN_PRICE_CHANGE = 0.3
 
 # ============================================================
 # ESTADO GLOBAL
@@ -75,7 +73,7 @@ def send(msg):
         pass
 
 # ============================================================
-# GMGN CLI - COMANDOS OFICIAIS
+# GMGN CLI
 # ============================================================
 def gmgn_cli_command(cmd):
     """Executa um comando do GMGN CLI e retorna o resultado"""
@@ -90,21 +88,25 @@ def gmgn_cli_command(cmd):
         )
         
         if result.returncode != 0:
-            print(f"[CLI] Erro: {result.stderr[:200]}")
+            print(f"[CLI] Erro (cod {result.returncode}): {result.stderr[:200]}")
             return None
         
         if not result.stdout.strip():
             print("[CLI] Resposta vazia")
             return None
             
-        return json.loads(result.stdout)
+        # Tenta fazer o parse do JSON
+        try:
+            data = json.loads(result.stdout)
+            return data
+        except json.JSONDecodeError as e:
+            print(f"[CLI] JSON inválido: {e}")
+            print(f"[CLI] Primeiros 500 caracteres da resposta:")
+            print(result.stdout[:500])
+            return None
         
     except subprocess.TimeoutExpired:
         print("[CLI] Timeout")
-        return None
-    except json.JSONDecodeError as e:
-        print(f"[CLI] JSON inválido: {e}")
-        print(f"[CLI] Resposta: {result.stdout[:200] if result else 'N/A'}")
         return None
     except Exception as e:
         print(f"[CLI] Exceção: {e}")
@@ -122,6 +124,13 @@ def get_trending_tokens(chain="sol", interval="1h", limit=20):
     result = gmgn_cli_command(cmd)
     if result and 'data' in result:
         return result['data']
+    elif result:
+        # Se não tiver 'data', pode ser um formato diferente
+        print(f"[CLI] Resposta sem 'data': {list(result.keys()) if result else 'None'}")
+        # Tenta retornar o próprio resultado se for uma lista
+        if isinstance(result, list):
+            return result
+        return []
     return []
 
 def get_trenches_tokens(chain="sol", limit=20):
@@ -139,7 +148,7 @@ def get_trenches_tokens(chain="sol", limit=20):
     return []
 
 def get_token_info(chain, address):
-    """Busca informações detalhadas de um token via GMGN CLI"""
+    """Busca informações detalhadas de um token"""
     cmd = [
         'gmgn-cli', 'token', 'info',
         '--chain', chain,
@@ -151,22 +160,8 @@ def get_token_info(chain, address):
         return result['data']
     return None
 
-def get_token_holders(chain, address):
-    """Busca holders de um token via GMGN CLI"""
-    cmd = [
-        'gmgn-cli', 'token', 'holders',
-        '--chain', chain,
-        '--address', address,
-        '--limit', '20',
-        '--raw'
-    ]
-    result = gmgn_cli_command(cmd)
-    if result and 'data' in result:
-        return result['data']
-    return None
-
 def get_token_traders(chain, address):
-    """Busca top traders de um token via GMGN CLI"""
+    """Busca top traders de um token"""
     cmd = [
         'gmgn-cli', 'token', 'traders',
         '--chain', chain,
@@ -180,36 +175,50 @@ def get_token_traders(chain, address):
     return []
 
 # ============================================================
-# ANÁLISE DO TOKEN (CORRIGIDA)
+# ANÁLISE DO TOKEN
 # ============================================================
 def analyze_tokens(tokens, source="trending"):
     """Analisa os tokens encontrados e envia alertas"""
     global stats
     
+    print(f"[DEBUG] Analisando {len(tokens)} tokens de {source}")
+    
     for token in tokens:
         try:
-            # DEBUG: Mostra o tipo e estrutura do token
+            # Se for string, tenta converter
             if isinstance(token, str):
                 try:
                     token = json.loads(token)
                 except:
-                    print(f"[DEBUG] Não foi possível converter string para JSON")
+                    print(f"[DEBUG] Token é string mas não JSON: {token[:100]}")
                     continue
             
+            # Se não for dict, tenta extrair
             if not isinstance(token, dict):
-                print(f"[DEBUG] Token não é dicionário: {type(token)}")
-                continue
+                print(f"[DEBUG] Token não é dict: {type(token)}")
+                # Se for lista, pega o primeiro elemento
+                if isinstance(token, list) and token:
+                    token = token[0]
+                    if not isinstance(token, dict):
+                        continue
+                else:
+                    continue
             
-            # Extrai dados do token
+            # Extrai dados
             address = token.get('address') or token.get('token_address') or token.get('id')
             if not address:
-                continue
+                # Tenta buscar em campos aninhados
+                if 'token' in token and isinstance(token['token'], dict):
+                    address = token['token'].get('address')
+                if not address:
+                    continue
             
-            # Verifica se já foi alertado
+            # Verifica duplicado
             with lock:
                 if address in tracked_tokens:
                     continue
             
+            # Extrai métricas
             symbol = token.get('symbol', '???')
             price = float(token.get('price', 0) or 0)
             volume_24h = float(token.get('volume_24h', 0) or token.get('volume', 0) or 0)
@@ -218,17 +227,15 @@ def analyze_tokens(tokens, source="trending"):
             holder_count = int(token.get('holder_count', 0) or token.get('holders', 0) or 0)
             smart_money_count = int(token.get('smart_degen_count', 0) or token.get('smart_money', 0) or 0)
             
-            # Filtros básicos
+            # Filtros
             if volume_24h < MIN_VOLUME:
                 continue
-            
             if holder_count < MIN_BUYS:
                 continue
-            
             if price_change_1h < MIN_PRICE_CHANGE:
                 continue
             
-            # Busca mais detalhes do token
+            # Busca mais detalhes (opcional)
             token_details = get_token_info('sol', address)
             if token_details:
                 symbol = token_details.get('symbol', symbol)
@@ -236,10 +243,7 @@ def analyze_tokens(tokens, source="trending"):
                 holder_count = int(token_details.get('holder_count', holder_count) or 0)
                 smart_money_count = int(token_details.get('smart_degen_count', smart_money_count) or 0)
             
-            # Busca top traders (se disponível)
-            top_traders = get_token_traders('sol', address)
-            
-            # Calcula score
+            # Score
             score = 0
             if price_change_1h > 10: score += 20
             elif price_change_1h > 5: score += 10
@@ -254,16 +258,15 @@ def analyze_tokens(tokens, source="trending"):
             elif market_cap > 50000: score += 10
             elif market_cap > 20000: score += 5
             
-            # Só alerta se score for bom
             if score < 25:
                 continue
             
-            # Marca como alertado
+            # Registra
             with lock:
                 tracked_tokens[address] = time.time()
                 stats["tokens_found"] += 1
             
-            # Prepara mensagem
+            # Monta mensagem
             confidence = "🔴"
             if score >= 70:
                 confidence = "🟢 FORTE"
@@ -275,7 +278,8 @@ def analyze_tokens(tokens, source="trending"):
             tp3 = price * 7.0
             stop = price * 0.85
             
-            # Mensagem do trader (se houver)
+            # Busca traders
+            top_traders = get_token_traders('sol', address)
             traders_msg = ""
             if top_traders and len(top_traders) > 0:
                 traders_msg = f"\n🐋 *Top Traders:*\n"
@@ -316,7 +320,6 @@ def analyze_tokens(tokens, source="trending"):
 # MONITORAR TOKENS
 # ============================================================
 def monitor_tokens():
-    """Monitora tokens em tempo real via GMGN CLI"""
     print("[MONITOR] Iniciando monitoramento com GMGN CLI...")
     
     while True:
@@ -329,7 +332,6 @@ def monitor_tokens():
             else:
                 print("[MONITOR] Nenhum token em alta encontrado")
             
-            # Também busca tokens novos (Trenches)
             print("[MONITOR] Buscando novos tokens...")
             trenches = get_trenches_tokens(limit=10)
             if trenches:
@@ -355,15 +357,10 @@ def relatorio():
                 alerts = stats["alerts"]
                 tokens = stats["tokens_found"]
             
-            # Testa conectividade do CLI
-            test = get_trending_tokens(limit=1)
-            cli_status = "✅ ONLINE" if test else "⚠️ OFFLINE"
-            
             txt = (
                 f"📊 *RELATÓRIO 2H*\n\n"
                 f"📈 Alertas enviados: `{alerts}`\n"
-                f"💎 Tokens analisados: `{tokens}`\n"
-                f"🔗 GMGN CLI: {cli_status}\n\n"
+                f"💎 Tokens analisados: `{tokens}`\n\n"
                 f"🔍 Monitorando tokens em alta e novos\n"
                 f"✅ *MODO MANUAL* - Você decide as entradas"
             )
@@ -373,50 +370,35 @@ def relatorio():
         time.sleep(REPORT_INTERVAL)
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 @app.route("/")
 def health():
     with lock:
         alerts = stats["alerts"]
         tokens = stats["tokens_found"]
-    return f"WHALE HUNTER v19.1 | alerts={alerts} | tokens={tokens}"
-
-@app.route("/test")
-def test_cli():
-    """Endpoint para testar o GMGN CLI"""
-    try:
-        result = get_trending_tokens(limit=3)
-        if result:
-            return {"status": "ok", "tokens": len(result), "data": result[:3]}
-        else:
-            return {"status": "error", "message": "CLI não retornou dados"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return f"WHALE HUNTER v19.2 | alerts={alerts} | tokens={tokens}"
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v19.1 (GMGN CLI CORRIGIDO) ===")
-    print(f"[INFO] IPv4 forçado: {allowed_gateways()}")
+    print("=== INICIANDO WHALE HUNTER v19.2 (GMGN CLI DEBUG) ===")
     
-    # Testa o GMGN CLI
+    # Testa o CLI
     print("[TESTE] Verificando GMGN CLI...")
     test_result = get_trending_tokens(limit=1)
     if test_result:
-        print("[TESTE] ✅ GMGN CLI funcionando!")
+        print(f"[TESTE] ✅ GMGN CLI funcionando! Retornou {len(test_result)} tokens")
     else:
-        print("[TESTE] ⚠️ GMGN CLI não retornou dados - verifique a instalação")
+        print("[TESTE] ⚠️ GMGN CLI não retornou dados")
     
-    send("🟢 *WHALE HUNTER v19.1 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v19.2 ONLINE*\n\n"
          "🐋 *GMGN CLI CONECTADO*\n"
          "🔍 Monitorando tokens em tempo real\n"
          "📝 Alertas completos para análise\n\n"
-         "⚠️ *MODO MANUAL* - Você decide se compra ou vende\n\n"
-         "✅ *Usando API oficial da GMGN*")
+         "⚠️ *MODO MANUAL* - Você decide se compra ou vende")
     
-    # Inicia threads
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()
     threading.Thread(target=monitor_tokens, daemon=True).start()

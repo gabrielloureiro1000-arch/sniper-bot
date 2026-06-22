@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v19.6 - PARSER ROBUSTO
+# WHALE HUNTER v19.7 - CORRIGE PARSER DO DATA
 # ============================================================
 import os
 import time
@@ -115,21 +115,29 @@ def get_trending_tokens(chain="sol", interval="1h", limit=20):
     ]
     result = gmgn_cli_command(cmd)
     
-    if result:
-        print(f"[DEBUG] Tipo de resposta: {type(result)}")
-        print(f"[DEBUG] Chaves: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+    # Verifica se a resposta é um dict com 'data'
+    if result and isinstance(result, dict):
+        print(f"[DEBUG] Chaves da resposta: {list(result.keys())}")
         
-        if isinstance(result, dict) and 'data' in result:
-            return result['data']
-        if isinstance(result, dict) and 'tokens' in result:
-            return result['tokens']
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict):
-            for key, value in result.items():
-                if isinstance(value, list):
-                    print(f"[DEBUG] Usando chave '{key}' como lista de tokens")
-                    return value
+        # Se tem 'data' e é uma lista, retorna ela
+        if 'data' in result:
+            data = result['data']
+            print(f"[DEBUG] data é do tipo: {type(data)}")
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                # Se 'data' for um dict, tenta extrair a lista
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        print(f"[DEBUG] Usando data['{key}'] como lista")
+                        return value
+                # Se não encontrar lista, retorna o dict como lista de um elemento
+                return [data]
+        
+        # Tenta outras chaves comuns
+        for key in ['tokens', 'items', 'results']:
+            if key in result and isinstance(result[key], list):
+                return result[key]
     
     return []
 
@@ -144,7 +152,14 @@ def get_trenches_tokens(chain="sol", limit=20):
     ]
     result = gmgn_cli_command(cmd)
     if result and 'data' in result:
-        return result['data']
+        data = result['data']
+        if isinstance(data, list):
+            return data
+        elif isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, list):
+                    return value
+            return [data]
     return []
 
 def get_token_info(chain, address):
@@ -241,6 +256,7 @@ def analyze_tokens(tokens, source="trending"):
             if price_change_1h < MIN_PRICE_CHANGE:
                 continue
             
+            # Score
             score = 0
             if price_change_1h > 10: score += 20
             elif price_change_1h > 5: score += 10
@@ -359,7 +375,7 @@ def health():
     with lock:
         alerts = stats["alerts"]
         tokens = stats["tokens_found"]
-    return f"WHALE HUNTER v19.6 | alerts={alerts} | tokens={tokens}"
+    return f"WHALE HUNTER v19.7 | alerts={alerts} | tokens={tokens}"
 
 @app.route("/debug")
 def debug_output():
@@ -377,7 +393,7 @@ def debug_output():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v19.6 (PARSER ROBUSTO) ===")
+    print("=== INICIANDO WHALE HUNTER v19.7 (PARSER CORRIGIDO) ===")
     
     test_result = get_trending_tokens(limit=1)
     if test_result:
@@ -385,12 +401,11 @@ if __name__ == "__main__":
     else:
         print("[TESTE] ⚠️ GMGN CLI não retornou dados - verifique o debug")
     
-    send("🟢 *WHALE HUNTER v19.6 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v19.7 ONLINE*\n\n"
          "🐋 *GMGN CLI CONECTADO*\n"
          "🔍 Monitorando tokens em tempo real\n"
          "📝 Alertas completos para análise\n\n"
-         "⚠️ *MODO MANUAL* - Você decide se compra ou vende\n\n"
-         "🔧 *Debug:* https://sniper-bot-2-eouj.onrender.com/debug")
+         "⚠️ *MODO MANUAL* - Você decide se compra ou vende")
     
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()

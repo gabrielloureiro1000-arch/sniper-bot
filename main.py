@@ -1,11 +1,6 @@
 # ============================================================
-# WHALE HUNTER v20.0 - TOP 10 TRADERS
+# WHALE HUNTER v20.1 - SMART MONEY + KOLs
 # ============================================================
-# - Identifica os 10 melhores traders do dia
-# - Monitora as compras deles em tempo real
-# - Envia alertas APENAS quando eles compram
-# ============================================================
-
 import os
 import time
 import threading
@@ -36,14 +31,14 @@ app = Flask(__name__)
 
 SCAN_DELAY = 30
 REPORT_INTERVAL = 7200
-TOP_TRADERS_UPDATE_INTERVAL = 600  # Atualiza a cada 10 min
+TOP_TRADERS_UPDATE_INTERVAL = 600
 
 # ============================================================
 # ESTADO GLOBAL
 # ============================================================
 lock = threading.Lock()
-top_traders = []  # Lista dos top traders do dia
-tracked_tokens = {}  # Tokens já alertados
+top_traders = []
+tracked_tokens = {}
 last_trader_update = 0
 stats = {"alerts": 0, "traders_found": 0}
 tg_queue = Queue()
@@ -73,7 +68,7 @@ def send(msg):
         pass
 
 # ============================================================
-# GMGN CLI - COMANDOS
+# GMGN CLI
 # ============================================================
 def gmgn_cli_command(cmd):
     """Executa um comando do GMGN CLI e retorna o resultado"""
@@ -109,29 +104,24 @@ def gmgn_cli_command(cmd):
         print(f"[CLI] Exceção: {e}")
         return None
 
-def get_top_traders():
-    """Busca os top traders do dia via GMGN CLI"""
-    # Tenta diferentes comandos para encontrar top traders
-    commands = [
-        ['gmgn-cli', 'track', 'smartmoney', '--limit', '10', '--raw'],
-        ['gmgn-cli', 'track', 'kol', '--limit', '10', '--raw'],
-        ['gmgn-cli', 'market', 'traders', '--chain', 'sol', '--limit', '10', '--raw'],
-    ]
-    
-    for cmd in commands:
-        result = gmgn_cli_command(cmd)
-        if result and 'data' in result:
-            data = result['data']
-            if isinstance(data, list) and data:
-                return data
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    if isinstance(value, list) and value:
-                        return value
+def get_smart_money():
+    """Busca Smart Money (traders mais lucrativos)"""
+    cmd = ['gmgn-cli', 'track', 'smartmoney', '--chain', 'sol', '--limit', '20', '--raw']
+    result = gmgn_cli_command(cmd)
+    if result and 'data' in result:
+        return result['data']
+    return []
+
+def get_kols():
+    """Busca KOLs (influenciadores)"""
+    cmd = ['gmgn-cli', 'track', 'kol', '--chain', 'sol', '--limit', '20', '--raw']
+    result = gmgn_cli_command(cmd)
+    if result and 'data' in result:
+        return result['data']
     return []
 
 def get_trader_activity(trader_address):
-    """Busca atividades recentes de um trader"""
+    """Busca atividades recentes de um trader usando follow-wallet"""
     cmd = [
         'gmgn-cli', 'track', 'follow-wallet',
         '--chain', 'sol',
@@ -144,11 +134,11 @@ def get_trader_activity(trader_address):
         return result['data']
     return []
 
-def get_token_info(chain, address):
+def get_token_info(address):
     """Busca informações detalhadas de um token"""
     cmd = [
         'gmgn-cli', 'token', 'info',
-        '--chain', chain,
+        '--chain', 'sol',
         '--address', address,
         '--raw'
     ]
@@ -157,54 +147,92 @@ def get_token_info(chain, address):
         return result['data']
     return None
 
+def get_trending_tokens(limit=20):
+    """Busca tokens em alta (fallback)"""
+    cmd = [
+        'gmgn-cli', 'market', 'trending',
+        '--chain', 'sol',
+        '--interval', '1h',
+        '--limit', str(limit),
+        '--raw'
+    ]
+    result = gmgn_cli_command(cmd)
+    if result and 'data' in result:
+        data = result['data']
+        if isinstance(data, dict) and 'rank' in data:
+            return data['rank']
+        if isinstance(data, list):
+            return data
+    return []
+
 # ============================================================
-# IDENTIFICAR TOP TRADERS
+# IDENTIFICAR TOP TRADERS (SMART MONEY + KOLs)
 # ============================================================
 def identify_top_traders():
-    """Identifica os 10 melhores traders do momento"""
+    """Identifica os melhores traders (Smart Money + KOLs)"""
     global top_traders, stats, last_trader_update
     
-    print("[UPDATE] Buscando top traders do dia...")
-    send("🔄 *Atualizando lista de Top 10 Traders*")
+    print("[UPDATE] Buscando Smart Money e KOLs...")
+    send("🔄 *Atualizando lista de Top Traders*")
     
-    traders = get_top_traders()
+    # Busca Smart Money
+    smart_money = get_smart_money()
+    print(f"[UPDATE] Smart Money encontrados: {len(smart_money) if smart_money else 0}")
     
-    if not traders:
+    # Busca KOLs
+    kols = get_kols()
+    print(f"[UPDATE] KOLs encontrados: {len(kols) if kols else 0}")
+    
+    # Combina as listas (remove duplicatas)
+    combined = {}
+    
+    if smart_money:
+        for trader in smart_money:
+            addr = trader.get('address')
+            if addr:
+                combined[addr] = trader
+    
+    if kols:
+        for trader in kols:
+            addr = trader.get('address')
+            if addr and addr not in combined:
+                combined[addr] = trader
+    
+    traders_list = list(combined.values())
+    
+    if not traders_list:
         print("[UPDATE] Nenhum trader encontrado")
-        send("⚠️ *Nenhum top trader encontrado no momento*")
+        send("⚠️ *Nenhum trader encontrado no momento*")
         return
     
+    # Pega os 15 primeiros (para ter margem)
     with lock:
-        top_traders = traders[:10]
+        top_traders = traders_list[:15]
         stats["traders_found"] = len(top_traders)
         last_trader_update = time.time()
     
-    # Envia lista dos traders no Telegram
-    msg = f"📋 *TOP 10 TRADERS DO DIA*\n\n"
-    msg += f"Monitorando {len(top_traders)} traders:\n\n"
+    # Envia lista no Telegram
+    msg = f"📋 *TOP TRADERS MONITORADOS*\n\n"
+    msg += f"Smart Money + KOLs: {len(top_traders)} traders\n\n"
     for i, t in enumerate(top_traders[:10], 1):
-        addr = t.get('address', 'N/A')[:8] + '...' + t.get('address', 'N/A')[-8:]
-        profit = t.get('profit', 0)
-        msg += f"{i}. 🐋 `{addr}`\n"
-        if profit:
-            msg += f"   Lucro: `${profit:,.0f}`\n"
+        addr = t.get('address', 'N/A')
+        msg += f"{i}. 🐋 `{addr[:8]}...{addr[-8:]}`\n"
     msg += f"\n⏰ Atualizado em {datetime.now().strftime('%H:%M')}"
     
     send(msg)
     print(f"[UPDATE] Top traders: {len(top_traders)} encontrados")
 
 # ============================================================
-# MONITORAR ATIVIDADES DOS TRADERS
+# MONITORAR TRADERS
 # ============================================================
 def monitor_traders():
-    """Monitora as compras dos top traders em tempo real"""
+    """Monitora as compras dos top traders"""
     global last_trader_update, stats
     
-    print("[MONITOR] Iniciando monitoramento de top traders...")
+    print("[MONITOR] Iniciando monitoramento...")
     
     while True:
         try:
-            # Atualiza lista de traders periodicamente
             if time.time() - last_trader_update > TOP_TRADERS_UPDATE_INTERVAL:
                 identify_top_traders()
             
@@ -221,9 +249,7 @@ def monitor_traders():
                 if not trader_addr:
                     continue
                 
-                print(f"[MONITOR] Verificando trader: {trader_addr[:8]}...")
-                
-                # Busca atividades do trader
+                # Busca atividades
                 activities = get_trader_activity(trader_addr)
                 
                 if not activities:
@@ -231,7 +257,6 @@ def monitor_traders():
                 
                 for activity in activities:
                     try:
-                        # Verifica se é uma compra
                         side = activity.get('side', '').lower()
                         if side != 'buy':
                             continue
@@ -240,14 +265,13 @@ def monitor_traders():
                         if not token_addr:
                             continue
                         
-                        # Verifica se já alertou este token
                         with lock:
                             if token_addr in tracked_tokens:
                                 continue
                             tracked_tokens[token_addr] = time.time()
                         
-                        # Busca informações do token
-                        token_info = get_token_info('sol', token_addr)
+                        # Busca info do token
+                        token_info = get_token_info(token_addr)
                         if not token_info:
                             continue
                         
@@ -259,7 +283,7 @@ def monitor_traders():
                         holder_count = int(token_info.get('holder_count', 0) or 0)
                         smart_money_count = int(token_info.get('smart_degen_count', 0) or 0)
                         
-                        # Calcula score
+                        # Score
                         score = 0
                         if price_change_1h > 10: score += 20
                         elif price_change_1h > 5: score += 10
@@ -270,7 +294,6 @@ def monitor_traders():
                         if market_cap > 100000: score += 20
                         elif market_cap > 50000: score += 10
                         
-                        # Envia alerta
                         confidence = "🔴"
                         if score >= 70:
                             confidence = "🟢 FORTE"
@@ -305,12 +328,12 @@ def monitor_traders():
                         
                         send(msg)
                         stats["alerts"] += 1
-                        print(f"[ALERTA] {symbol} - Trader: {trader_addr[:8]}... - Score: {score:.0f}")
+                        print(f"[ALERTA] {symbol} - Trader: {trader_addr[:8]}...")
                         
                     except Exception as e:
-                        print(f"[MONITOR] Erro ao processar atividade: {e}")
+                        print(f"[MONITOR] Erro: {e}")
                 
-                time.sleep(2)  # Pequena pausa entre traders
+                time.sleep(2)
             
             time.sleep(SCAN_DELAY)
             
@@ -330,11 +353,11 @@ def relatorio():
                 traders = stats["traders_found"]
             
             txt = (
-                f"📊 *RELATÓRIO 2H - TOP TRADERS*\n\n"
+                f"📊 *RELATÓRIO 2H*\n\n"
                 f"🐋 Traders monitorados: `{traders}`\n"
                 f"📈 Alertas enviados: `{alerts}`\n\n"
-                f"🔍 Monitorando compras dos top 10 traders\n"
-                f"✅ *MODO MANUAL* - Você decide as entradas"
+                f"🔍 Smart Money + KOLs\n"
+                f"✅ *MODO MANUAL*"
             )
             send(txt)
         except Exception as e:
@@ -357,26 +380,22 @@ def debug_output():
         with open("/tmp/cli_output.txt", "r") as f:
             content = f.read()
         return f"<pre>{content}</pre>"
-    except FileNotFoundError:
+    except:
         return "Arquivo não encontrado"
-    except Exception as e:
-        return f"Erro: {e}"
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v20.0 (TOP TRADERS) ===")
+    print("=== INICIANDO WHALE HUNTER v20.1 (SMART MONEY + KOLs) ===")
     
-    # Identifica os top traders inicialmente
     identify_top_traders()
     
-    send("🟢 *WHALE HUNTER v20.0 ONLINE*\n\n"
-         "🐋 *TOP 10 TRADERS DO DIA*\n"
+    send("🟢 *WHALE HUNTER v20.1 ONLINE*\n\n"
+         "🐋 *SMART MONEY + KOLs*\n"
          "🔍 Monitorando compras dos melhores traders\n"
          "📝 Alertas APENAS quando eles compram\n\n"
-         "⚠️ *MODO MANUAL* - Você decide se compra ou vende\n\n"
-         "✅ *Copy trading de elite ativado*")
+         "⚠️ *MODO MANUAL* - Você decide se compra ou vende")
     
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=relatorio, daemon=True).start()

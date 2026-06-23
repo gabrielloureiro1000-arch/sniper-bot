@@ -1,5 +1,5 @@
 # ============================================================
-# WHALE HUNTER v20.1 - SMART MONEY + KOLs
+# WHALE HUNTER v20.2 - SMART MONEY + KOLs (CORRIGIDO)
 # ============================================================
 import os
 import time
@@ -68,7 +68,7 @@ def send(msg):
         pass
 
 # ============================================================
-# GMGN CLI
+# GMGN CLI - COMANDOS CORRIGIDOS
 # ============================================================
 def gmgn_cli_command(cmd):
     """Executa um comando do GMGN CLI e retorna o resultado"""
@@ -95,6 +95,7 @@ def gmgn_cli_command(cmd):
             return data
         except json.JSONDecodeError as e:
             print(f"[CLI] JSON inválido: {e}")
+            print(f"[CLI] Resposta: {result.stdout[:200]}")
             return None
         
     except subprocess.TimeoutExpired:
@@ -106,8 +107,16 @@ def gmgn_cli_command(cmd):
 
 def get_smart_money():
     """Busca Smart Money (traders mais lucrativos)"""
+    # Usando --chain sol explicitamente
     cmd = ['gmgn-cli', 'track', 'smartmoney', '--chain', 'sol', '--limit', '20', '--raw']
     result = gmgn_cli_command(cmd)
+    
+    # Se falhar, tenta sem o --chain (algumas versões podem não precisar)
+    if not result:
+        print("[DEBUG] Tentando smartmoney sem --chain...")
+        cmd = ['gmgn-cli', 'track', 'smartmoney', '--limit', '20', '--raw']
+        result = gmgn_cli_command(cmd)
+    
     if result and 'data' in result:
         return result['data']
     return []
@@ -116,12 +125,18 @@ def get_kols():
     """Busca KOLs (influenciadores)"""
     cmd = ['gmgn-cli', 'track', 'kol', '--chain', 'sol', '--limit', '20', '--raw']
     result = gmgn_cli_command(cmd)
+    
+    if not result:
+        print("[DEBUG] Tentando kol sem --chain...")
+        cmd = ['gmgn-cli', 'track', 'kol', '--limit', '20', '--raw']
+        result = gmgn_cli_command(cmd)
+    
     if result and 'data' in result:
         return result['data']
     return []
 
 def get_trader_activity(trader_address):
-    """Busca atividades recentes de um trader usando follow-wallet"""
+    """Busca atividades recentes de um trader"""
     cmd = [
         'gmgn-cli', 'track', 'follow-wallet',
         '--chain', 'sol',
@@ -166,7 +181,7 @@ def get_trending_tokens(limit=20):
     return []
 
 # ============================================================
-# IDENTIFICAR TOP TRADERS (SMART MONEY + KOLs)
+# IDENTIFICAR TOP TRADERS
 # ============================================================
 def identify_top_traders():
     """Identifica os melhores traders (Smart Money + KOLs)"""
@@ -183,7 +198,32 @@ def identify_top_traders():
     kols = get_kols()
     print(f"[UPDATE] KOLs encontrados: {len(kols) if kols else 0}")
     
-    # Combina as listas (remove duplicatas)
+    # Se não encontrou nada, tenta usar tokens em alta como fallback
+    if not smart_money and not kols:
+        print("[UPDATE] Nenhum trader encontrado. Usando tokens em alta como fallback...")
+        trending = get_trending_tokens(limit=10)
+        if trending:
+            # Cria traders fictícios baseados nos tokens em alta
+            fallback_traders = []
+            for token in trending[:5]:
+                addr = token.get('address', '')
+                if addr:
+                    fallback_traders.append({
+                        'address': addr,
+                        'type': 'trending_fallback'
+                    })
+            if fallback_traders:
+                with lock:
+                    top_traders = fallback_traders
+                    stats["traders_found"] = len(top_traders)
+                    last_trader_update = time.time()
+                
+                send(f"📋 *TOP TRADERS - FALLBACK*\n\n"
+                     f"Usando tokens em alta como referência:\n"
+                     + "\n".join([f"🐋 `{t.get('address', 'N/A')[:8]}...`" for t in top_traders]))
+                return
+    
+    # Combina as listas
     combined = {}
     
     if smart_money:
@@ -205,13 +245,11 @@ def identify_top_traders():
         send("⚠️ *Nenhum trader encontrado no momento*")
         return
     
-    # Pega os 15 primeiros (para ter margem)
     with lock:
         top_traders = traders_list[:15]
         stats["traders_found"] = len(top_traders)
         last_trader_update = time.time()
     
-    # Envia lista no Telegram
     msg = f"📋 *TOP TRADERS MONITORADOS*\n\n"
     msg += f"Smart Money + KOLs: {len(top_traders)} traders\n\n"
     for i, t in enumerate(top_traders[:10], 1):
@@ -387,11 +425,11 @@ def debug_output():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    print("=== INICIANDO WHALE HUNTER v20.1 (SMART MONEY + KOLs) ===")
+    print("=== INICIANDO WHALE HUNTER v20.2 (CORRIGIDO) ===")
     
     identify_top_traders()
     
-    send("🟢 *WHALE HUNTER v20.1 ONLINE*\n\n"
+    send("🟢 *WHALE HUNTER v20.2 ONLINE*\n\n"
          "🐋 *SMART MONEY + KOLs*\n"
          "🔍 Monitorando compras dos melhores traders\n"
          "📝 Alertas APENAS quando eles compram\n\n"
